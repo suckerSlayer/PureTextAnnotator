@@ -1,0 +1,52 @@
+# Thesis and office documents kept outside source control
+*.doc
+*.docx
+*.pdf
+~$*.doc*
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.tox/
+.nox/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime data and logs
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
