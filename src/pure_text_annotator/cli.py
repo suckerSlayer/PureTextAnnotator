@@ -1,4 +1,4 @@
-"""Command-line entry point for the text viewer."""
+"""Command-line entry point for the text annotator."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .files import TextFileError, load_text_file
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pta-view",
-        description="View a UTF-8 text or Markdown file in a Vim-style TUI.",
+        description="View and annotate a UTF-8 text or Markdown file in a Vim-style TUI.",
     )
     parser.add_argument("file", type=Path, help="path to a .txt, .md, or .markdown file")
     parser.add_argument(

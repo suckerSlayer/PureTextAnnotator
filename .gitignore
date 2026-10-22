@@ -41,6 +41,7 @@ dist/
 *.db
 *.sqlite
 *.sqlite3
+/examples/*.annotations.md
 
 # Editor and operating-system files
 .DS_Store
