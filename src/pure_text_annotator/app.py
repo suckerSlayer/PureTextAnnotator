@@ -14,7 +14,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, Input, Static, TextArea
 from textual.widgets.text_area import Selection
 
 from .annotations import (
@@ -41,6 +41,7 @@ class VimTextArea(TextArea):
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
         "text-area--annotation",
         "text-area--active-annotation",
+        "text-area--search-match",
     }
 
     visual_mode = reactive(False)
@@ -119,6 +120,7 @@ class VimTextArea(TextArea):
         self._active_annotation_spans: dict[
             int, tuple[tuple[int, int], ...]
         ] = {}
+        self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self.set_annotation_ranges(annotation_ranges)
 
     @property
@@ -185,6 +187,24 @@ class VimTextArea(TextArea):
             () if active_range is None else (active_range,),
         )
 
+    def set_search_match(
+        self, search_match: Optional[AnnotationRange]
+    ) -> None:
+        """Highlight the current search result without selecting its text."""
+
+        valid_match = (
+            search_match
+            if search_match is not None
+            and 0 <= search_match.start < search_match.end <= len(self.text)
+            else None
+        )
+        self._search_spans = self._build_annotation_spans(
+            self.text,
+            () if valid_match is None else (valid_match,),
+        )
+        self._line_cache.clear()
+        self.refresh()
+
     @staticmethod
     def _build_annotation_spans(
         text: str, annotation_ranges: Iterable[AnnotationRange]
@@ -235,6 +255,9 @@ class VimTextArea(TextArea):
         )
         for start, end in self._active_annotation_spans.get(line_index, ()):
             line.stylize(active_style, start, end)
+        search_style = self.get_component_rich_style("text-area--search-match")
+        for start, end in self._search_spans.get(line_index, ()):
+            line.stylize(search_style, start, end)
         return line
 
     def _should_select(self, force_select: bool = False) -> bool:
@@ -323,6 +346,7 @@ class AnnotationTextArea(TextArea):
         "text-area--annotation-quote",
         "text-area--annotation-meta",
         "text-area--inactive-annotation",
+        "text-area--search-match",
     }
 
     BINDINGS = [
@@ -363,6 +387,7 @@ class AnnotationTextArea(TextArea):
         self._annotation_links_by_line: dict[int, AnnotationLink] = {}
         self._metadata_lines: frozenset[int] = frozenset()
         self._quote_lines: frozenset[int] = frozenset()
+        self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self.set_annotation_links(annotation_links)
 
     @property
@@ -444,6 +469,24 @@ class AnnotationTextArea(TextArea):
             self._line_cache.clear()
             self.refresh()
 
+    def set_search_match(
+        self, search_match: Optional[AnnotationRange]
+    ) -> None:
+        """Highlight the current search result without selecting its text."""
+
+        valid_match = (
+            search_match
+            if search_match is not None
+            and 0 <= search_match.start < search_match.end <= len(self.text)
+            else None
+        )
+        self._search_spans = VimTextArea._build_annotation_spans(
+            self.text,
+            () if valid_match is None else (valid_match,),
+        )
+        self._line_cache.clear()
+        self.refresh()
+
     def get_line(self, line_index: int) -> Text:
         """Return a sidecar line with metadata, quote, and note styling."""
 
@@ -453,27 +496,32 @@ class AnnotationTextArea(TextArea):
             line.stylize(
                 self.get_component_rich_style("text-area--inactive-annotation")
             )
-            return line
-        if line_index in self._metadata_lines:
-            line.stylize(
-                self.get_component_rich_style("text-area--annotation-meta")
-            )
-        if line_index in self._quote_lines:
-            line.stylize(
-                self.get_component_rich_style("text-area--annotation-quote")
-            )
-        link = self._active_link
-        if (
-            link is not None
-            and link.sidecar_note_start_line is not None
-            and link.sidecar_note_end_line is not None
-            and link.sidecar_note_start_line
-            <= line_index
-            <= link.sidecar_note_end_line
-        ):
-            line.stylize(
-                self.get_component_rich_style("text-area--active-annotation")
-            )
+        else:
+            if line_index in self._metadata_lines:
+                line.stylize(
+                    self.get_component_rich_style("text-area--annotation-meta")
+                )
+            if line_index in self._quote_lines:
+                line.stylize(
+                    self.get_component_rich_style("text-area--annotation-quote")
+                )
+            link = self._active_link
+            if (
+                link is not None
+                and link.sidecar_note_start_line is not None
+                and link.sidecar_note_end_line is not None
+                and link.sidecar_note_start_line
+                <= line_index
+                <= link.sidecar_note_end_line
+            ):
+                line.stylize(
+                    self.get_component_rich_style(
+                        "text-area--active-annotation"
+                    )
+                )
+        search_style = self.get_component_rich_style("text-area--search-match")
+        for start, end in self._search_spans.get(line_index, ()):
+            line.stylize(search_style, start, end)
         return line
 
     def action_document_start(self) -> None:
@@ -481,6 +529,20 @@ class AnnotationTextArea(TextArea):
 
     def action_document_end(self) -> None:
         self.move_cursor(self.document.end)
+
+
+class SearchInput(Input):
+    """Compact Vim-style search prompt with explicit cancellation."""
+
+    BINDINGS = [
+        Binding("escape", "cancel_search", "Cancel search", show=False),
+    ]
+
+    class Cancelled(Message):
+        """Posted when the user dismisses the search prompt."""
+
+    def action_cancel_search(self) -> None:
+        self.post_message(self.Cancelled())
 
 
 class NoteModal(ModalScreen[Optional[str]]):
@@ -680,12 +742,28 @@ class ViewerApp(App[None]):
         text-style: dim;
     }
 
+    #viewer .text-area--search-match,
+    #annotator .text-area--search-match {
+        color: $text;
+        background: $success 45%;
+        text-style: bold;
+    }
+
     #status {
         height: 1;
         padding: 0 1;
         color: $text;
         background: $boost;
         text-overflow: ellipsis;
+    }
+
+    #search-input {
+        display: none;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        color: $text;
+        background: $boost;
     }
 
     #help {
@@ -714,6 +792,14 @@ class ViewerApp(App[None]):
             show=False,
             priority=True,
         ),
+        Binding("/", "start_search", "Search", show=False),
+        Binding("n", "search_next", "Next search result", show=False),
+        Binding(
+            "N,shift+n",
+            "search_previous",
+            "Previous search result",
+            show=False,
+        ),
     ]
 
     def __init__(
@@ -731,6 +817,9 @@ class ViewerApp(App[None]):
         self.last_copy_backend: Optional[str] = None
         self._pane_switch_pending = False
         self._pane_switch_timer: Optional[Timer] = None
+        self._search_target_id: Optional[str] = None
+        self._search_queries: dict[str, str] = {}
+        self._search_matches: dict[str, AnnotationRange] = {}
         self.annotation_store = annotation_store or AnnotationStore(source.path)
         try:
             self.annotation_text = self.annotation_store.read_text()
@@ -771,9 +860,15 @@ class ViewerApp(App[None]):
             annotator.border_title = "Annotation file"
             yield annotator
         yield Static("", markup=False, id="status")
+        yield SearchInput(
+            placeholder="/ Search",
+            compact=True,
+            select_on_focus=False,
+            id="search-input",
+        )
         yield Static(
-            "Tab switch panes  h/j/k/l move  Ctrl-F/B page  "
-            "Ctrl-W W panes  v select  a annotate  q quit",
+            "Tab/Ctrl-W W panes  h/j/k/l move  Ctrl-F/B page  "
+            "/ search  n/N repeat  v select  a annotate  q quit",
             markup=False,
             id="help",
         )
@@ -908,11 +1003,172 @@ class ViewerApp(App[None]):
             f"{mode}  |  Ln {row + 1}, Col {column + 1}  |  {wrap_info}{selection_info}"
         )
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in {"start_pane_switch", "finish_pane_switch"} and isinstance(
-            self.screen, NoteModal
-        ):
+    def _focused_search_target(self) -> Optional[TextArea]:
+        """Return the searchable pane that currently owns keyboard focus."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        if viewer.has_focus:
+            return viewer
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if annotator.has_focus:
+            return annotator
+        return None
+
+    def _search_target(self, target_id: str) -> TextArea:
+        """Resolve a stored pane identifier to its text area."""
+
+        if target_id == "viewer":
+            return self.query_one("#viewer", VimTextArea)
+        return self.query_one("#annotator", AnnotationTextArea)
+
+    @staticmethod
+    def _location_for_text_offset(text: str, offset: int) -> tuple[int, int]:
+        """Convert a code-point offset to a TextArea row and column."""
+
+        row = text.count("\n", 0, offset)
+        line_start = text.rfind("\n", 0, offset) + 1
+        return row, offset - line_start
+
+    def _set_search_match(
+        self, target_id: str, search_match: Optional[AnnotationRange]
+    ) -> None:
+        """Update a pane's current-match overlay and tracked range."""
+
+        target = self._search_target(target_id)
+        if isinstance(target, VimTextArea):
+            target.set_search_match(search_match)
+        else:
+            assert isinstance(target, AnnotationTextArea)
+            target.set_search_match(search_match)
+        if search_match is None:
+            self._search_matches.pop(target_id, None)
+        else:
+            self._search_matches[target_id] = search_match
+
+    def _clear_stale_search_match(self, target_id: str) -> None:
+        """Clear a result highlight after the cursor moves away from it."""
+
+        search_match = self._search_matches.get(target_id)
+        if search_match is None:
+            return
+        target = self._search_target(target_id)
+        offset = location_to_offset(target.text, target.cursor_location)
+        if not search_match.start <= offset < search_match.end:
+            self._set_search_match(target_id, None)
+
+    def _close_search_prompt(self) -> Optional[str]:
+        """Hide the prompt, restore the status row, and refocus its pane."""
+
+        target_id = self._search_target_id
+        search_input = self.query_one("#search-input", SearchInput)
+        search_input.display = False
+        self.query_one("#status", Static).display = True
+        self._search_target_id = None
+        if target_id is not None:
+            self._search_target(target_id).focus()
+        self._refresh_status()
+        return target_id
+
+    def _perform_search(
+        self, target_id: str, query: str, *, forward: bool
+    ) -> bool:
+        """Move to one literal match, wrapping at document boundaries."""
+
+        target = self._search_target(target_id)
+        text = target.text
+        cursor_offset = location_to_offset(text, target.cursor_location)
+        wrapped = False
+
+        if forward:
+            match_start = text.find(query, min(cursor_offset + 1, len(text)))
+            if match_start < 0:
+                match_start = text.find(query)
+                wrapped = match_start >= 0
+        else:
+            match_start = text.rfind(query, 0, cursor_offset)
+            if match_start < 0:
+                match_start = text.rfind(query)
+                wrapped = match_start >= 0
+
+        if match_start < 0:
+            self._set_search_match(target_id, None)
+            self.notify(
+                f"Pattern not found: {query}",
+                severity="warning",
+                timeout=2,
+            )
             return False
+
+        match = AnnotationRange(match_start, match_start + len(query))
+        if isinstance(target, VimTextArea) and target.visual_mode:
+            target.action_cancel_visual()
+        target.move_cursor(
+            self._location_for_text_offset(text, match_start),
+            center=True,
+        )
+        self._set_search_match(target_id, match)
+        if wrapped:
+            boundary = "top" if forward else "bottom"
+            self.notify(f"Search wrapped to {boundary}", timeout=1)
+        return True
+
+    def action_start_search(self) -> None:
+        """Open a Vim-style search prompt for the focused pane."""
+
+        target = self._focused_search_target()
+        if target is None or target.id is None:
+            return
+        if self._pane_switch_pending:
+            self._clear_pane_switch_prefix()
+        if isinstance(target, VimTextArea) and target.visual_mode:
+            target.action_cancel_visual()
+
+        self._search_target_id = target.id
+        search_input = self.query_one("#search-input", SearchInput)
+        pane_name = "source" if target.id == "viewer" else "annotations"
+        search_input.value = "/"
+        search_input.cursor_position = 1
+        search_input.placeholder = f"Search {pane_name}"
+        self.query_one("#status", Static).display = False
+        search_input.display = True
+        search_input.focus()
+
+    def action_search_next(self) -> None:
+        """Repeat the current pane's last search forward."""
+
+        target = self._focused_search_target()
+        if target is None or target.id is None:
+            return
+        query = self._search_queries.get(target.id)
+        if query is None:
+            self.notify("No previous search in this pane", timeout=1.5)
+            return
+        self._perform_search(target.id, query, forward=True)
+
+    def action_search_previous(self) -> None:
+        """Repeat the current pane's last search backward."""
+
+        target = self._focused_search_target()
+        if target is None or target.id is None:
+            return
+        query = self._search_queries.get(target.id)
+        if query is None:
+            self.notify("No previous search in this pane", timeout=1.5)
+            return
+        self._perform_search(target.id, query, forward=False)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        search_input = self.query_one("#search-input", SearchInput)
+        if action in {
+            "start_search",
+            "search_next",
+            "search_previous",
+        }:
+            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+                return False
+        if action in {"start_pane_switch", "finish_pane_switch"}:
+            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+                return False
         if action == "finish_pane_switch":
             return self._pane_switch_pending
         return super().check_action(action, parameters)
@@ -947,6 +1203,7 @@ class ViewerApp(App[None]):
 
     @on(TextArea.SelectionChanged, "#viewer")
     def on_viewer_selection_changed(self, _event: TextArea.SelectionChanged) -> None:
+        self._clear_stale_search_match("viewer")
         self._refresh_status()
         if self.query_one("#viewer", VimTextArea).has_focus:
             self._align_annotation_to_source()
@@ -955,8 +1212,38 @@ class ViewerApp(App[None]):
     def on_annotator_selection_changed(
         self, _event: TextArea.SelectionChanged
     ) -> None:
+        self._clear_stale_search_match("annotator")
         if self.query_one("#annotator", AnnotationTextArea).has_focus:
             self._align_source_to_annotation()
+
+    @on(Input.Submitted, "#search-input")
+    def on_search_submitted(self, event: Input.Submitted) -> None:
+        """Run a search submitted from the bottom prompt."""
+
+        event.stop()
+        target_id = self._search_target_id
+        if target_id is None:
+            self._close_search_prompt()
+            return
+
+        entered_query = (
+            event.value[1:] if event.value.startswith("/") else event.value
+        )
+        query = entered_query or self._search_queries.get(target_id, "")
+        if not query:
+            self.notify("Enter text to search for", severity="warning", timeout=1.5)
+            return
+
+        self._search_queries[target_id] = query
+        self._close_search_prompt()
+        self._perform_search(target_id, query, forward=True)
+
+    @on(SearchInput.Cancelled)
+    def on_search_cancelled(self, event: SearchInput.Cancelled) -> None:
+        """Dismiss the prompt without changing the current search."""
+
+        event.stop()
+        self._close_search_prompt()
 
     @on(VimTextArea.ModeChanged)
     def on_viewer_mode_changed(self, _event: VimTextArea.ModeChanged) -> None:
@@ -1003,6 +1290,7 @@ class ViewerApp(App[None]):
         annotator = self.query_one("#annotator", AnnotationTextArea)
         annotator.load_text(updated)
         annotator.set_annotation_links(self.annotation_links)
+        self._set_search_match("annotator", None)
         viewer.set_annotation_ranges(self.annotation_ranges)
         if self.annotation_links:
             newest_link = self.annotation_links[-1]

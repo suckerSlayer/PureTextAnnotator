@@ -12,6 +12,7 @@ from pure_text_annotator.annotations import (
 from pure_text_annotator.app import (
     AnnotationTextArea,
     NoteModal,
+    SearchInput,
     ViewerApp,
     VimTextArea,
 )
@@ -452,6 +453,94 @@ def test_source_alignment_uses_nearest_annotation_in_gaps(
             await pilot.pause()
             assert viewer.cursor_location == (1, 0)
             assert annotator.active_link == app.annotation_links[0]
+
+    asyncio.run(scenario())
+
+
+def test_search_source_with_vim_repeat_keys() -> None:
+    async def scenario() -> None:
+        app = ViewerApp(
+            make_source("zero quiet\nmiddle\nquiet end"),
+            clipboard_writer=lambda _text: "test",
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            search_input = app.query_one(SearchInput)
+
+            await pilot.press("/", "q", "u", "i", "e", "t", "enter")
+            await pilot.pause()
+
+            assert viewer.has_focus
+            assert search_input.display is False
+            assert viewer.cursor_location == (0, 5)
+            assert [
+                (span.start, span.end) for span in viewer.get_line(0).spans
+            ] == [(5, 10)]
+
+            await pilot.press("n")
+            await pilot.pause()
+            assert viewer.cursor_location == (2, 0)
+            assert viewer.get_line(0).spans == []
+            assert [
+                (span.start, span.end) for span in viewer.get_line(2).spans
+            ] == [(0, 5)]
+
+            await pilot.press("n")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 5)
+
+            await pilot.press("shift+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (2, 0)
+
+    asyncio.run(scenario())
+
+
+def test_search_annotation_pane_and_cancel_prompt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("source", encoding="utf-8")
+        sidecar = tmp_path / "source.txt.annotations.md"
+        sidecar.write_text(
+            "# Notes\nneedle one\nfiller\nneedle two\n",
+            encoding="utf-8",
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            search_input = app.query_one(SearchInput)
+
+            await pilot.press("tab", "/")
+            assert search_input.has_focus
+            await pilot.press("n", "e", "e", "d", "l", "e", "enter")
+            await pilot.pause()
+
+            assert annotator.has_focus
+            assert annotator.cursor_location == (1, 0)
+            assert [
+                (span.start, span.end) for span in annotator.get_line(1).spans
+            ] == [(0, 6)]
+
+            await pilot.press("n")
+            await pilot.pause()
+            assert annotator.cursor_location == (3, 0)
+
+            await pilot.press("/", "m", "i", "s", "s", "i", "n", "g")
+            assert search_input.has_focus
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert annotator.has_focus
+            assert search_input.display is False
+            assert annotator.cursor_location == (3, 0)
+
+            await pilot.press("n")
+            await pilot.pause()
+            assert annotator.cursor_location == (1, 0)
 
     asyncio.run(scenario())
 

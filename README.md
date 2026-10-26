@@ -40,6 +40,8 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Ctrl+F / Ctrl+B or Page Down / Page Up | Move one page |
 | `v` | Start or finish visual selection |
 | `a` | Add a note for the selected source text |
+| `/` | Search within the focused pane |
+| `n` / `N` | Repeat the pane's search forward / backward |
 | Tab / Shift+Tab | Switch between source and annotation panes |
 | Ctrl+W, then `w` | Switch between source and annotation panes |
 | Shift+arrow keys | Extend a selection |
@@ -51,6 +53,11 @@ Use `--no-wrap` to keep long lines unwrapped.
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is
 available.
+
+Search is literal and case-sensitive. Press `/` in either pane, enter the text,
+and press Enter. The current match is highlighted and centered; `n` and `N`
+continue through matches with wraparound. Escape closes the search prompt
+without moving the cursor. Each pane remembers its own most recent query.
 
 ## Add an annotation
 
@@ -86,7 +93,8 @@ dimmed so the current note remains easy to identify.
 - Read-only display with line numbers and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
 - Original quotation and source range recorded for every note
-- No annotation editing/deletion, source-change recovery, or search yet
+- Literal search with forward/backward repetition in both panes
+- No annotation editing/deletion or source-change recovery yet
 
 ## Test
 
