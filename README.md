@@ -42,6 +42,8 @@ Use `--no-wrap` to keep long lines unwrapped.
 | `a` | Add a note for the selected source text |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
+| `S` | Cycle alignment mode: Normal → Sync → Off |
+| `.` | Manually align the other pane from the focused pane |
 | Tab / Shift+Tab | Switch between source and annotation panes |
 | Ctrl+W, then `w` | Switch between source and annotation panes |
 | Shift+arrow keys | Extend a selection |
@@ -59,6 +61,20 @@ and press Enter. The current match is highlighted and centered; `n` and `N`
 continue through matches with wraparound. Escape closes the search prompt
 without moving the cursor. Each pane remembers its own most recent query.
 
+## Alignment modes
+
+The status line shows the current alignment mode. Press `S` to cycle through:
+
+| Mode | Automatic alignment |
+| --- | --- |
+| Normal (default) | Source movement aligns the annotation pane; annotation movement stays local. |
+| Sync | Movement in either pane aligns the other pane. |
+| Off | Movement in either pane stays local. |
+
+In every mode, press `.` to align manually from the focused pane: from the
+source it centers the corresponding annotation on `### Note`; from an annotation
+it centers the source on that annotation's recorded range.
+
 ## Add an annotation
 
 1. Press `v` and move the cursor to select source text.
@@ -75,9 +91,9 @@ and immediately after a new note is saved. The currently aligned range uses the
 same blue as the focused annotation's original quotation. Moving through the
 source centers the matching annotation on its `### Note` heading. When the cursor
 is between annotated ranges, the nearest annotation remains aligned; an
-exact-distance tie keeps the current annotation focused. Moving through
-annotation entries with the same Vim/page keys returns the source pane to the
-corresponding recorded range.
+exact-distance tie keeps the current annotation focused. Annotation movement
+returns the source pane to the corresponding recorded range in Sync mode, or
+when requested manually with `.` in Normal and Off modes.
 
 The focused annotation is visually distinct in the right pane: its
 `## Annotation N` heading uses the normal text color, its original quotation has

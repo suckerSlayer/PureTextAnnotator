@@ -13,6 +13,7 @@ from pure_text_annotator.app import (
     AnnotationTextArea,
     NoteModal,
     SearchInput,
+    SyncMode,
     ViewerApp,
     VimTextArea,
 )
@@ -308,6 +309,10 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             annotator = app.query_one(AnnotationTextArea)
             await pilot.pause()
 
+            assert app.sync_mode is SyncMode.NORMAL
+            await pilot.press("shift+s")
+            assert app.sync_mode is SyncMode.SYNC
+
             assert annotator.active_link == app.annotation_links[0]
             assert (
                 annotator.cursor_location[0]
@@ -399,6 +404,91 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert viewer.cursor_location == (3, 0)
             assert annotator.active_link == app.annotation_links[1]
             assert viewer.active_annotation_range == second_link.source_range
+
+    asyncio.run(scenario())
+
+
+def test_alignment_modes_and_manual_alignment(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("zero\none\ntwo\nthree", encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, 4, "zero"),
+                "First note",
+                annotation_id="first",
+                created_at="2026-10-21T10:00:00Z",
+            )
+        )
+        store.append(
+            create_record(
+                AnnotationDraft(13, 18, "three"),
+                "Second note",
+                annotation_id="second",
+                created_at="2026-10-21T10:01:00Z",
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.pause()
+            first_link, second_link = app.annotation_links
+
+            assert app.sync_mode is SyncMode.NORMAL
+            assert annotator.active_link == first_link
+
+            await pilot.press("G")
+            await pilot.pause()
+            assert annotator.active_link == second_link
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert annotator.active_link == first_link
+
+            annotator.focus()
+            await pilot.press("G")
+            await pilot.pause()
+            assert annotator.active_link == second_link
+            assert viewer.cursor_location == (0, 0)
+            assert viewer.active_annotation_range == first_link.source_range
+
+            await pilot.press(".")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+            assert viewer.active_annotation_range == second_link.source_range
+
+            await pilot.press("shift+s", "g")
+            await pilot.pause()
+            assert app.sync_mode is SyncMode.SYNC
+            assert annotator.active_link == first_link
+            assert viewer.cursor_location == (0, 0)
+            assert viewer.active_annotation_range == first_link.source_range
+
+            await pilot.press("shift+s")
+            assert app.sync_mode is SyncMode.OFF
+            viewer.focus()
+            annotation_cursor = annotator.cursor_location
+
+            await pilot.press("G")
+            await pilot.pause()
+            assert viewer.cursor_location == viewer.document.end
+            assert annotator.cursor_location == annotation_cursor
+            assert annotator.active_link == first_link
+            assert viewer.active_annotation_range == first_link.source_range
+
+            await pilot.press(".")
+            await pilot.pause()
+            assert annotator.active_link == second_link
+            assert annotator.cursor_location[0] == second_link.sidecar_note_line
+            assert viewer.active_annotation_range == second_link.source_range
+
+            await pilot.press("shift+s")
+            assert app.sync_mode is SyncMode.NORMAL
 
     asyncio.run(scenario())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from enum import Enum
 from typing import Callable, Iterable, Optional
 
 from rich.text import Text
@@ -33,6 +34,14 @@ from .files import LoadedTextFile
 
 
 ClipboardWriter = Callable[[str], Optional[str]]
+
+
+class SyncMode(str, Enum):
+    """Automatic cross-pane alignment policy."""
+
+    NORMAL = "Normal"
+    SYNC = "Sync"
+    OFF = "Off"
 
 
 class VimTextArea(TextArea):
@@ -800,6 +809,13 @@ class ViewerApp(App[None]):
             "Previous search result",
             show=False,
         ),
+        Binding(
+            "S,shift+s",
+            "cycle_sync_mode",
+            "Cycle alignment mode",
+            show=False,
+        ),
+        Binding(".", "align_panes", "Align focused pane", show=False),
     ]
 
     def __init__(
@@ -820,6 +836,7 @@ class ViewerApp(App[None]):
         self._search_target_id: Optional[str] = None
         self._search_queries: dict[str, str] = {}
         self._search_matches: dict[str, AnnotationRange] = {}
+        self.sync_mode = SyncMode.NORMAL
         self.annotation_store = annotation_store or AnnotationStore(source.path)
         try:
             self.annotation_text = self.annotation_store.read_text()
@@ -867,7 +884,7 @@ class ViewerApp(App[None]):
             id="search-input",
         )
         yield Static(
-            "Tab/Ctrl-W W panes  h/j/k/l move  Ctrl-F/B page  "
+            "Tab/Ctrl-W W panes  S sync mode  . align  h/j/k/l move  "
             "/ search  n/N repeat  v select  a annotate  q quit",
             markup=False,
             id="help",
@@ -969,14 +986,23 @@ class ViewerApp(App[None]):
         annotator.show_link(link, move_cursor=True)
         viewer.set_active_annotation_range(link.source_range)
 
-    def _align_source_to_annotation(self) -> None:
+    def _focus_annotation_at_cursor(self) -> Optional[AnnotationLink]:
+        """Update annotation-pane focus without moving the source cursor."""
+
         annotator = self.query_one("#annotator", AnnotationTextArea)
         link = self._link_for_sidecar_line(annotator.cursor_location[0])
         if link is None:
             annotator.clear_active_link()
-            return
+            return None
 
         annotator.show_link(link, move_cursor=False)
+        return link
+
+    def _align_source_to_annotation(self) -> None:
+        link = self._focus_annotation_at_cursor()
+        if link is None:
+            return
+
         viewer = self.query_one("#viewer", VimTextArea)
         viewer.set_active_annotation_range(link.source_range)
         if viewer.visual_mode:
@@ -1000,7 +1026,8 @@ class ViewerApp(App[None]):
         selection_info = f"  |  {len(selected)} chars selected" if selected else ""
         wrap_info = "wrap" if viewer.soft_wrap else "no wrap"
         self.query_one("#status", Static).update(
-            f"{mode}  |  Ln {row + 1}, Col {column + 1}  |  {wrap_info}{selection_info}"
+            f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
+            f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}{selection_info}"
         )
 
     def _focused_search_target(self) -> Optional[TextArea]:
@@ -1157,6 +1184,24 @@ class ViewerApp(App[None]):
             return
         self._perform_search(target.id, query, forward=False)
 
+    def action_cycle_sync_mode(self) -> None:
+        """Cycle Normal, Sync, and Off cross-pane alignment modes."""
+
+        modes = (SyncMode.NORMAL, SyncMode.SYNC, SyncMode.OFF)
+        current_index = modes.index(self.sync_mode)
+        self.sync_mode = modes[(current_index + 1) % len(modes)]
+        self._refresh_status()
+        self.notify(f"Alignment mode: {self.sync_mode.value}", timeout=1.25)
+
+    def action_align_panes(self) -> None:
+        """Manually align the other pane from the focused pane."""
+
+        target = self._focused_search_target()
+        if isinstance(target, VimTextArea):
+            self._align_annotation_to_source()
+        elif isinstance(target, AnnotationTextArea):
+            self._align_source_to_annotation()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         search_input = self.query_one("#search-input", SearchInput)
         if action in {
@@ -1164,6 +1209,9 @@ class ViewerApp(App[None]):
             "search_next",
             "search_previous",
         }:
+            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+                return False
+        if action in {"cycle_sync_mode", "align_panes"}:
             if isinstance(self.screen, NoteModal) or search_input.has_focus:
                 return False
         if action in {"start_pane_switch", "finish_pane_switch"}:
@@ -1205,7 +1253,10 @@ class ViewerApp(App[None]):
     def on_viewer_selection_changed(self, _event: TextArea.SelectionChanged) -> None:
         self._clear_stale_search_match("viewer")
         self._refresh_status()
-        if self.query_one("#viewer", VimTextArea).has_focus:
+        if (
+            self.query_one("#viewer", VimTextArea).has_focus
+            and self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}
+        ):
             self._align_annotation_to_source()
 
     @on(TextArea.SelectionChanged, "#annotator")
@@ -1214,7 +1265,10 @@ class ViewerApp(App[None]):
     ) -> None:
         self._clear_stale_search_match("annotator")
         if self.query_one("#annotator", AnnotationTextArea).has_focus:
-            self._align_source_to_annotation()
+            if self.sync_mode is SyncMode.SYNC:
+                self._align_source_to_annotation()
+            else:
+                self._focus_annotation_at_cursor()
 
     @on(Input.Submitted, "#search-input")
     def on_search_submitted(self, event: Input.Submitted) -> None:
