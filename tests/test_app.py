@@ -158,6 +158,7 @@ def test_annotation_flow_saves_sidecar_and_refreshes_pane(tmp_path: Path) -> Non
             viewer = app.query_one(VimTextArea)
             assert viewer.selected_text == ""
             assert viewer.annotation_ranges == (AnnotationRange(0, 2),)
+            assert viewer.active_annotation_range == AnnotationRange(0, 2)
             assert [(span.start, span.end) for span in viewer.get_line(0).spans] == [
                 (0, 2)
             ]
@@ -233,9 +234,11 @@ Existing note.
             load_text_file(source_path), clipboard_writer=lambda _text: "test"
         )
 
-        async with app.run_test(size=(100, 22)):
+        async with app.run_test(size=(100, 22)) as pilot:
+            await pilot.pause()
             viewer = app.query_one(VimTextArea)
             assert viewer.annotation_ranges == (AnnotationRange(3, 8),)
+            assert viewer.active_annotation_range == AnnotationRange(3, 8)
             assert [(span.start, span.end) for span in viewer.get_line(0).spans] == [
                 (3, 5)
             ]
@@ -310,6 +313,22 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
                 == app.annotation_links[0].sidecar_note_line
             )
             first_link = app.annotation_links[0]
+            second_link = app.annotation_links[1]
+            assert viewer.active_annotation_range == first_link.source_range
+            active_source_style = viewer.get_component_rich_style(
+                "text-area--active-annotation"
+            )
+            active_quote_style = annotator.get_component_rich_style(
+                "text-area--annotation-quote"
+            )
+            normal_source_style = viewer.get_component_rich_style(
+                "text-area--annotation"
+            )
+            assert active_source_style.bgcolor == active_quote_style.bgcolor
+            first_source_style = viewer.get_line(0).spans[0].style
+            second_source_style = viewer.get_line(3).spans[0].style
+            assert first_source_style == active_source_style
+            assert second_source_style == normal_source_style
             metadata_line = annotator.get_line(first_link.sidecar_start_line)
             assert [
                 (span.start, span.end) for span in metadata_line.spans
@@ -338,7 +357,6 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert metadata_line.spans[0].style != quote_line.spans[0].style
             assert quote_line.spans[0].style != note_line.spans[0].style
 
-            second_link = app.annotation_links[1]
             second_heading_line = second_link.sidecar_start_line + 1
             inactive_heading = annotator.get_line(second_heading_line)
             assert inactive_heading.plain == "## Annotation 2"
@@ -360,6 +378,9 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
                 annotator.cursor_location[0]
                 == app.annotation_links[1].sidecar_note_line
             )
+            assert viewer.active_annotation_range == second_link.source_range
+            assert viewer.get_line(0).spans[0].style == second_source_style
+            assert viewer.get_line(3).spans[0].style == first_source_style
             assert annotator.get_line(second_heading_line).spans == []
             assert annotator.get_line(annotation_heading_line).spans
 
@@ -369,12 +390,14 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
 
             assert viewer.cursor_location == (0, 0)
             assert annotator.active_link == app.annotation_links[0]
+            assert viewer.active_annotation_range == first_link.source_range
 
             await pilot.press("G")
             await pilot.pause()
 
             assert viewer.cursor_location == (3, 0)
             assert annotator.active_link == app.annotation_links[1]
+            assert viewer.active_annotation_range == second_link.source_range
 
     asyncio.run(scenario())
 

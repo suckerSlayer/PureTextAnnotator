@@ -63,12 +63,14 @@ The right pane mirrors the complete annotation file. For a source named
 `chapter.md`, notes are saved beside it as `chapter.md.annotations.md`. Each
 entry contains a stable identifier, creation time, the original quotation, the
 note, and a zero-based half-open source range measured in Unicode code points.
-Recorded ranges are highlighted in the source pane when the file opens and
-immediately after a new note is saved. Moving through the source centers the
-matching annotation on its `### Note` heading. When the cursor is between
-annotated ranges, the nearest annotation remains aligned; an exact-distance tie
-keeps the current annotation focused. Moving through annotation entries with the
-same Vim/page keys returns the source pane to the corresponding recorded range.
+Recorded ranges are highlighted in yellow in the source pane when the file opens
+and immediately after a new note is saved. The currently aligned range uses the
+same blue as the focused annotation's original quotation. Moving through the
+source centers the matching annotation on its `### Note` heading. When the cursor
+is between annotated ranges, the nearest annotation remains aligned; an
+exact-distance tie keeps the current annotation focused. Moving through
+annotation entries with the same Vim/page keys returns the source pane to the
+corresponding recorded range.
 
 The focused annotation is visually distinct in the right pane: its
 `## Annotation N` heading uses the normal text color, its original quotation has

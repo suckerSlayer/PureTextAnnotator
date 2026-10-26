@@ -38,7 +38,10 @@ ClipboardWriter = Callable[[str], Optional[str]]
 class VimTextArea(TextArea):
     """A read-only TextArea with a small, predictable Vim key set."""
 
-    COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {"text-area--annotation"}
+    COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
+        "text-area--annotation",
+        "text-area--active-annotation",
+    }
 
     visual_mode = reactive(False)
 
@@ -112,6 +115,10 @@ class VimTextArea(TextArea):
         )
         self._annotation_ranges: tuple[AnnotationRange, ...] = ()
         self._annotation_spans: dict[int, tuple[tuple[int, int], ...]] = {}
+        self._active_annotation_range: Optional[AnnotationRange] = None
+        self._active_annotation_spans: dict[
+            int, tuple[tuple[int, int], ...]
+        ] = {}
         self.set_annotation_ranges(annotation_ranges)
 
     @property
@@ -119,6 +126,12 @@ class VimTextArea(TextArea):
         """The valid persisted ranges currently highlighted in the source."""
 
         return self._annotation_ranges
+
+    @property
+    def active_annotation_range(self) -> Optional[AnnotationRange]:
+        """The source range synchronized with the focused sidecar entry."""
+
+        return self._active_annotation_range
 
     def set_annotation_ranges(
         self, annotation_ranges: Iterable[AnnotationRange]
@@ -132,9 +145,45 @@ class VimTextArea(TextArea):
             if 0 <= annotation_range.start < annotation_range.end <= len(text)
         )
         self._annotation_ranges = valid_ranges
-        self._annotation_spans = self._build_annotation_spans(text, valid_ranges)
+        if self._active_annotation_range not in valid_ranges:
+            self._active_annotation_range = None
+        self._rebuild_annotation_spans()
         self._line_cache.clear()
         self.refresh()
+
+    def set_active_annotation_range(
+        self, annotation_range: Optional[AnnotationRange]
+    ) -> None:
+        """Highlight one synchronized range while leaving the others yellow."""
+
+        active_range = (
+            annotation_range
+            if annotation_range in self._annotation_ranges
+            else None
+        )
+        if active_range == self._active_annotation_range:
+            return
+        self._active_annotation_range = active_range
+        self._rebuild_annotation_spans()
+        self._line_cache.clear()
+        self.refresh()
+
+    def _rebuild_annotation_spans(self) -> None:
+        """Rebuild normal and active highlights from the persisted ranges."""
+
+        active_range = self._active_annotation_range
+        inactive_ranges = tuple(
+            annotation_range
+            for annotation_range in self._annotation_ranges
+            if annotation_range != active_range
+        )
+        self._annotation_spans = self._build_annotation_spans(
+            self.text, inactive_ranges
+        )
+        self._active_annotation_spans = self._build_annotation_spans(
+            self.text,
+            () if active_range is None else (active_range,),
+        )
 
     @staticmethod
     def _build_annotation_spans(
@@ -181,6 +230,11 @@ class VimTextArea(TextArea):
         annotation_style = self.get_component_rich_style("text-area--annotation")
         for start, end in self._annotation_spans.get(line_index, ()):
             line.stylize(annotation_style, start, end)
+        active_style = self.get_component_rich_style(
+            "text-area--active-annotation"
+        )
+        for start, end in self._active_annotation_spans.get(line_index, ()):
+            line.stylize(active_style, start, end)
         return line
 
     def _should_select(self, force_select: bool = False) -> bool:
@@ -602,12 +656,18 @@ class ViewerApp(App[None]):
     }
 
     #annotator .text-area--active-annotation {
+        color: $text;
         background: $accent 18%;
     }
 
+    #viewer .text-area--active-annotation,
     #annotator .text-area--annotation-quote {
         color: $text;
         background: $secondary 22%;
+    }
+
+    #viewer .text-area--active-annotation {
+        text-style: underline;
     }
 
     #annotator .text-area--annotation-meta {
@@ -809,8 +869,10 @@ class ViewerApp(App[None]):
         link = self._link_for_source_offset(offset)
         if link is None:
             annotator.clear_active_link()
+            viewer.set_active_annotation_range(None)
             return
         annotator.show_link(link, move_cursor=True)
+        viewer.set_active_annotation_range(link.source_range)
 
     def _align_source_to_annotation(self) -> None:
         annotator = self.query_one("#annotator", AnnotationTextArea)
@@ -821,6 +883,7 @@ class ViewerApp(App[None]):
 
         annotator.show_link(link, move_cursor=False)
         viewer = self.query_one("#viewer", VimTextArea)
+        viewer.set_active_annotation_range(link.source_range)
         if viewer.visual_mode:
             viewer.action_cancel_visual()
         viewer.move_cursor(
@@ -942,7 +1005,9 @@ class ViewerApp(App[None]):
         annotator.set_annotation_links(self.annotation_links)
         viewer.set_annotation_ranges(self.annotation_ranges)
         if self.annotation_links:
-            annotator.show_link(self.annotation_links[-1], move_cursor=True)
+            newest_link = self.annotation_links[-1]
+            annotator.show_link(newest_link, move_cursor=True)
+            viewer.set_active_annotation_range(newest_link.source_range)
         viewer.action_cancel_visual()
         viewer.focus()
         self.notify(
