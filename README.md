@@ -34,7 +34,9 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Keys | Action |
 | --- | --- |
 | `h` `j` `k` `l` or arrow keys | Move the cursor |
-| `w` `b` | Move by word |
+| `w` | Move to the start of the next Vim word |
+| `b` | Move to the previous word |
+| `e` | Move to the end of the word |
 | `0` `$` or Home/End | Move to line start/end |
 | `g` `G` | Move to document start/end |
 | Ctrl+F / Ctrl+B or Page Down / Page Up | Move one page |
@@ -51,6 +53,10 @@ Use `--no-wrap` to keep long lines unwrapped.
 | `y`, Ctrl+C, or Cmd+C | Copy selected text |
 | Escape | Clear the selection |
 | `q` or Ctrl+Q | Quit |
+
+The `w` and `e` motions are available in both panes and follow Vim's
+lowercase-word boundaries: letters, numbers, and underscores form one kind of
+word, while adjacent non-blank symbols form another. Whitespace is skipped.
 
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is

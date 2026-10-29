@@ -53,6 +53,78 @@ def test_viewer_is_read_only_and_supports_vim_movement() -> None:
     asyncio.run(scenario())
 
 
+def test_e_moves_to_word_ends_in_both_panes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha, beta\n\nx ray", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            await pilot.press("e")
+            assert viewer.cursor_location == (0, 4)
+            await pilot.press("e")
+            assert viewer.cursor_location == (0, 5)
+            await pilot.press("e")
+            assert viewer.cursor_location == (0, 10)
+            await pilot.press("e")
+            assert viewer.cursor_location == (2, 0)
+            await pilot.press("e")
+            assert viewer.cursor_location == (2, 4)
+            await pilot.press("e")
+            assert viewer.cursor_location == (2, 4)
+
+            await pilot.press("tab", "e")
+            assert annotator.cursor_location == (0, 2)
+            await pilot.press("e")
+            assert annotator.cursor_location == (1, 5)
+
+    asyncio.run(scenario())
+
+
+def test_w_moves_to_word_starts_in_both_panes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text(
+            "alpha, **beta**\n\n_gamma delta", encoding="utf-8"
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            await pilot.press("w")
+            assert viewer.cursor_location == (0, 5)
+            await pilot.press("w")
+            assert viewer.cursor_location == (0, 7)
+            await pilot.press("w")
+            assert viewer.cursor_location == (0, 9)
+            await pilot.press("w")
+            assert viewer.cursor_location == (0, 13)
+            await pilot.press("w")
+            assert viewer.cursor_location == (2, 0)
+            await pilot.press("w")
+            assert viewer.cursor_location == (2, 7)
+            await pilot.press("w")
+            assert viewer.cursor_location == (2, 7)
+
+            await pilot.press("tab", "w")
+            assert annotator.cursor_location == (1, 0)
+            await pilot.press("w")
+            assert annotator.cursor_location == (1, 6)
+            await pilot.press("w")
+            assert annotator.cursor_location == (1, 8)
+
+    asyncio.run(scenario())
+
+
 def test_visual_selection_can_be_yanked() -> None:
     async def scenario() -> None:
         copied = []
@@ -646,7 +718,7 @@ def test_ctrl_w_w_switches_panes_without_breaking_word_motion() -> None:
             annotator = app.query_one(AnnotationTextArea)
 
             await pilot.press("w")
-            assert viewer.cursor_location == (0, 5)
+            assert viewer.cursor_location == (0, 6)
 
             await pilot.press("0", "ctrl+w")
             assert viewer.has_focus

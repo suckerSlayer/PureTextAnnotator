@@ -44,6 +44,69 @@ class SyncMode(str, Enum):
     OFF = "Off"
 
 
+def _vim_word_kind(character: str) -> Optional[bool]:
+    """Classify a character using Vim's lowercase-word boundaries."""
+
+    if character.isspace():
+        return None
+    return character.isalnum() or character == "_"
+
+
+def _vim_word_end_location(text_area: TextArea) -> tuple[int, int]:
+    """Return the target of Vim's ``e`` motion for a text area."""
+
+    text = text_area.text
+    cursor_index = text_area.document.get_index_from_location(
+        text_area.cursor_location
+    )
+    if cursor_index >= len(text):
+        return text_area.cursor_location
+
+    cursor_kind = _vim_word_kind(text[cursor_index])
+    if cursor_kind is not None:
+        word_end = cursor_index
+        while (
+            word_end + 1 < len(text)
+            and _vim_word_kind(text[word_end + 1]) == cursor_kind
+        ):
+            word_end += 1
+        if word_end > cursor_index:
+            return text_area.document.get_location_from_index(word_end)
+        search_index = cursor_index + 1
+    else:
+        search_index = cursor_index
+
+    while search_index < len(text) and text[search_index].isspace():
+        search_index += 1
+    if search_index >= len(text):
+        return text_area.cursor_location
+
+    word_kind = _vim_word_kind(text[search_index])
+    word_end = search_index
+    while (
+        word_end + 1 < len(text)
+        and _vim_word_kind(text[word_end + 1]) == word_kind
+    ):
+        word_end += 1
+    return text_area.document.get_location_from_index(word_end)
+
+
+def _vim_word_start_location(text_area: TextArea) -> tuple[int, int]:
+    """Return the start of the next Vim word, skipping whitespace."""
+
+    text = text_area.text
+    cursor_index = text_area.document.get_index_from_location(
+        text_area.cursor_location
+    )
+    for search_index in range(cursor_index + 1, len(text)):
+        word_kind = _vim_word_kind(text[search_index])
+        if word_kind is None:
+            continue
+        if _vim_word_kind(text[search_index - 1]) != word_kind:
+            return text_area.document.get_location_from_index(search_index)
+    return text_area.cursor_location
+
+
 class VimTextArea(TextArea):
     """A read-only TextArea with a small, predictable Vim key set."""
 
@@ -66,6 +129,7 @@ class VimTextArea(TextArea):
         Binding("shift+right", "vim_right(True)", "Select right", show=False),
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
         Binding("b,ctrl+left", "vim_word_left", "Previous word", show=False),
+        Binding("e", "vim_word_end", "End of word", show=False),
         Binding("0,home", "vim_line_start", "Line start", show=False),
         Binding("$,end", "vim_line_end", "Line end", show=False),
         Binding("g", "vim_document_start", "Document start", show=False),
@@ -288,7 +352,14 @@ class VimTextArea(TextArea):
         self.action_cursor_word_left(self.visual_mode)
 
     def action_vim_word_right(self) -> None:
-        self.action_cursor_word_right(self.visual_mode)
+        self.move_cursor(
+            _vim_word_start_location(self), select=self.visual_mode
+        )
+
+    def action_vim_word_end(self) -> None:
+        self.move_cursor(
+            _vim_word_end_location(self), select=self.visual_mode
+        )
 
     def action_vim_line_start(self) -> None:
         self.action_cursor_line_start(self.visual_mode)
@@ -363,6 +434,8 @@ class AnnotationTextArea(TextArea):
         Binding("j,down", "cursor_down", "Down", show=False),
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("l,right", "cursor_right", "Right", show=False),
+        Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
+        Binding("e", "vim_word_end", "End of word", show=False),
         Binding("0,home", "cursor_line_start", "Line start", show=False),
         Binding("$,end", "cursor_line_end", "Line end", show=False),
         Binding("g", "document_start", "Document start", show=False),
@@ -538,6 +611,12 @@ class AnnotationTextArea(TextArea):
 
     def action_document_end(self) -> None:
         self.move_cursor(self.document.end)
+
+    def action_vim_word_end(self) -> None:
+        self.move_cursor(_vim_word_end_location(self))
+
+    def action_vim_word_right(self) -> None:
+        self.move_cursor(_vim_word_start_location(self))
 
 
 class SearchInput(Input):
