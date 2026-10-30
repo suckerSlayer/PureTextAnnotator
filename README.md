@@ -48,6 +48,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Ctrl+W in Edit mode | Delete the previous word |
 | Ctrl+H in Edit mode | Delete the previous character |
 | Escape or Ctrl+`[` in Edit mode | Return to Normal mode |
+| `u` in Normal mode | Undo the most recent edit batch |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
@@ -81,6 +82,10 @@ deletes the previous word, Ctrl+H deletes the previous character, and Escape or
 Ctrl+`[` returns to Normal mode. Ctrl+Q remains available to quit. Source changes
 are saved atomically to the original file while preserving its UTF-8 BOM, newline
 style, and permissions.
+
+In Normal mode, `u` reverts the most recent edit batch in the focused pane and
+atomically saves the reverted source or annotation file. Separate Edit-mode
+sessions create separate undo steps.
 
 Source edits do not rewrite existing annotation ranges or quoted original text.
 Those annotations therefore continue to refer to their previously recorded

@@ -114,9 +114,9 @@ def test_edit_mode_writes_source_and_supports_vim_exit_keys(
             assert app.query_one("#status", Static).render().plain.startswith(
                 "EDIT"
             )
-            await pilot.press("q", "w", "i", "z", "t", "b")
+            await pilot.press("q", "w", "i", "z", "t", "b", "u")
             await pilot.pause()
-            assert viewer.text == "alpha betaqwiztb"
+            assert viewer.text == "alpha betaqwiztbu"
             assert source_path.read_text(encoding="utf-8") == viewer.text
 
             await pilot.press("ctrl+w")
@@ -200,9 +200,9 @@ def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
                 "EDIT"
             )
 
-            await pilot.press("q", "w", "i", "z", "t", "b")
+            await pilot.press("q", "w", "i", "z", "t", "b", "u")
             await pilot.pause()
-            assert annotator.text.endswith("qwiztb")
+            assert annotator.text.endswith("qwiztbu")
             assert app.annotation_store.path.read_text(
                 encoding="utf-8"
             ) == annotator.text
@@ -223,6 +223,54 @@ def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
             original = annotator.text
             await pilot.press("x")
             assert annotator.text == original
+
+    asyncio.run(scenario())
+
+
+def test_normal_u_undoes_and_persists_edits_in_both_panes(
+    tmp_path: Path,
+) -> None:
+    async def confirm_source_edit(pilot, app: ViewerApp) -> None:
+        await pilot.press("i")
+        await pilot.pause()
+        confirmation = app.screen.query_one("#edit-confirmation", Input)
+        confirmation.value = "Yes"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            await pilot.press("G")
+            await confirm_source_edit(pilot, app)
+            await pilot.press("x", "y", "z", "escape")
+            await pilot.pause()
+            assert viewer.text == "alphaxyz"
+
+            await pilot.press("u")
+            await pilot.pause()
+            assert viewer.text == "alpha"
+            assert source_path.read_text(encoding="utf-8") == "alpha"
+
+            initial_annotations = app.annotation_store.initial_text()
+            await pilot.press("tab", "G", "i", "x", "y", "z", "escape")
+            await pilot.pause()
+            assert annotator.text == initial_annotations + "xyz"
+
+            await pilot.press("u")
+            await pilot.pause()
+            assert annotator.text == initial_annotations
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == initial_annotations
 
     asyncio.run(scenario())
 

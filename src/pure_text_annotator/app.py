@@ -207,6 +207,7 @@ class VimTextArea(TextArea):
         Binding("v", "toggle_visual", "Visual selection", show=False),
         Binding("a", "annotate", "Add annotation", show=False),
         Binding("i", "request_edit", "Edit source", show=False),
+        Binding("u", "vim_undo", "Undo change", show=False),
         Binding(
             "escape,ctrl+left_square_bracket",
             "exit_edit",
@@ -264,6 +265,7 @@ class VimTextArea(TextArea):
             int, tuple[tuple[int, int], ...]
         ] = {}
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
+        self._normal_undo_pending = False
         self.set_annotation_ranges(annotation_ranges)
 
     @property
@@ -428,6 +430,7 @@ class VimTextArea(TextArea):
             "toggle_visual",
             "annotate",
             "request_edit",
+            "vim_undo",
             "yank",
         }
         if self.edit_mode and action in normal_mode_actions:
@@ -509,11 +512,19 @@ class VimTextArea(TextArea):
     def action_request_edit(self) -> None:
         self.post_message(self.EditRequested())
 
+    def action_vim_undo(self) -> None:
+        previous_text = self.text
+        self._normal_undo_pending = True
+        self.undo()
+        if self.text == previous_text:
+            self._normal_undo_pending = False
+
     def enter_edit_mode(self) -> None:
         """Make the source buffer editable after external confirmation."""
 
         if self.visual_mode:
             self.action_cancel_visual()
+        self.history.checkpoint()
         self.selection = Selection.cursor(self.cursor_location)
         self.read_only = False
         self.edit_mode = True
@@ -526,6 +537,7 @@ class VimTextArea(TextArea):
             return
         self.read_only = True
         self.edit_mode = False
+        self.history.checkpoint()
         self.selection = Selection.cursor(self.cursor_location)
         self.post_message(self.ModeChanged())
 
@@ -574,6 +586,7 @@ class AnnotationTextArea(TextArea):
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
         Binding("e", "vim_word_end", "End of word", show=False),
         Binding("i", "request_edit", "Edit annotations", show=False),
+        Binding("u", "vim_undo", "Undo change", show=False),
         Binding(
             "escape,ctrl+left_square_bracket",
             "exit_edit",
@@ -625,6 +638,7 @@ class AnnotationTextArea(TextArea):
         self._metadata_lines: frozenset[int] = frozenset()
         self._quote_lines: frozenset[int] = frozenset()
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
+        self._normal_undo_pending = False
         self.set_annotation_links(annotation_links)
 
     def check_action(
@@ -646,6 +660,7 @@ class AnnotationTextArea(TextArea):
             "vim_scroll_down_line",
             "vim_scroll_up_line",
             "request_edit",
+            "vim_undo",
         }
         if self.edit_mode and action in normal_mode_actions:
             return False
@@ -808,7 +823,15 @@ class AnnotationTextArea(TextArea):
     def action_request_edit(self) -> None:
         self.post_message(self.EditRequested())
 
+    def action_vim_undo(self) -> None:
+        previous_text = self.text
+        self._normal_undo_pending = True
+        self.undo()
+        if self.text == previous_text:
+            self._normal_undo_pending = False
+
     def enter_edit_mode(self) -> None:
+        self.history.checkpoint()
         self.selection = Selection.cursor(self.cursor_location)
         self.read_only = False
         self.edit_mode = True
@@ -819,6 +842,7 @@ class AnnotationTextArea(TextArea):
             return
         self.read_only = True
         self.edit_mode = False
+        self.history.checkpoint()
         self.selection = Selection.cursor(self.cursor_location)
         self.post_message(self.ModeChanged())
 
@@ -1353,7 +1377,7 @@ class ViewerApp(App[None]):
         return (
             "Tab/Ctrl-W W panes  i edit  S sync mode  . align  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
-            "/ search  n/N repeat  v select  a annotate  q quit"
+            "u undo  / search  n/N repeat  v select  a annotate  q quit"
         )
 
     @staticmethod
@@ -1842,8 +1866,9 @@ class ViewerApp(App[None]):
 
         viewer = event.text_area
         assert isinstance(viewer, VimTextArea)
-        if not viewer.edit_mode:
+        if not (viewer.edit_mode or viewer._normal_undo_pending):
             return
+        viewer._normal_undo_pending = False
 
         try:
             saved_source = self._source_writer(self.source, viewer.text)
@@ -1893,8 +1918,9 @@ class ViewerApp(App[None]):
 
         annotator = event.text_area
         assert isinstance(annotator, AnnotationTextArea)
-        if not annotator.edit_mode:
+        if not (annotator.edit_mode or annotator._normal_undo_pending):
             return
+        annotator._normal_undo_pending = False
 
         try:
             updated = self.annotation_store.write(annotator.text)
