@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from pure_text_annotator.files import TextFileError, load_text_file
+from pure_text_annotator.files import (
+    TextFileError,
+    load_text_file,
+    save_text_file,
+)
 
 
 def test_loads_utf8_bom_and_normalises_newlines(tmp_path: Path) -> None:
@@ -25,6 +29,23 @@ def test_loads_chinese_utf8_text(tmp_path: Path) -> None:
 
     assert loaded.text == "第一行\n第二行"
     assert loaded.line_count == 2
+
+
+def test_atomic_save_preserves_bom_newlines_and_permissions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "notes.md"
+    source.write_bytes(b"\xef\xbb\xbfalpha\r\nbeta")
+    source.chmod(0o640)
+    loaded = load_text_file(source)
+
+    saved = save_text_file(loaded, "alpha\nbeta\ngamma")
+
+    assert source.read_bytes() == b"\xef\xbb\xbfalpha\r\nbeta\r\ngamma"
+    assert source.stat().st_mode & 0o777 == 0o640
+    assert saved.text == "alpha\nbeta\ngamma"
+    assert saved.line_count == 3
+    assert saved.size_bytes == len(source.read_bytes())
 
 
 def test_rejects_unsupported_extension(tmp_path: Path) -> None:

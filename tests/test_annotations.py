@@ -78,6 +78,17 @@ def test_store_preserves_existing_text_when_appending(tmp_path: Path) -> None:
     assert "> two" in saved
 
 
+def test_store_replaces_complete_annotation_document(tmp_path: Path) -> None:
+    source = tmp_path / "chapter.md"
+    source.write_text("source", encoding="utf-8")
+    store = AnnotationStore(source)
+
+    saved = store.write("# Edited annotations\n")
+
+    assert saved == "# Edited annotations\n"
+    assert store.path.read_text(encoding="utf-8") == saved
+
+
 def test_parse_annotation_ranges_reads_persisted_metadata(tmp_path: Path) -> None:
     source = tmp_path / "chapter.txt"
     source.write_text("one two three", encoding="utf-8")

@@ -2,8 +2,8 @@
 
 Pure Text Annotator is a keyboard-first terminal interface for UTF-8 text and
 Markdown files. It displays Markdown source as plain text, provides Vim-style
-navigation and selection, and saves notes in a human-readable Markdown sidecar
-shown beside the source.
+navigation, selection, and guarded editing, and saves notes in a human-readable
+Markdown sidecar shown beside the source.
 
 ## Set up
 
@@ -40,8 +40,14 @@ Use `--no-wrap` to keep long lines unwrapped.
 | `0` `$` or Home/End | Move to line start/end |
 | `g` `G` | Move to document start/end |
 | Ctrl+F / Ctrl+B or Page Down / Page Up | Move one page |
+| Ctrl+E / Ctrl+Y | Scroll down/up by one line |
+| `zt` / `zz` / `zb` | Place the cursor line at the top/middle/bottom |
 | `v` | Start or finish visual selection |
 | `a` | Add a note for the selected source text |
+| `i` | Enter Edit mode for the focused pane |
+| Ctrl+W in Edit mode | Delete the previous word |
+| Ctrl+H in Edit mode | Delete the previous character |
+| Escape or Ctrl+`[` in Edit mode | Return to Normal mode |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
@@ -57,6 +63,28 @@ Use `--no-wrap` to keep long lines unwrapped.
 The `w` and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
 word, while adjacent non-blank symbols form another. Whitespace is skipped.
+
+## Edit text
+
+With the source pane focused, press `i` to request Edit mode. Because this mode
+changes the original file, a warning dialog opens every time. Type the exact
+case-sensitive text `Yes` and press Enter (or select **Edit original**) to proceed;
+any other input is rejected. Escape cancels the warning.
+
+With the annotation pane focused, press `i` to enter Edit mode immediately; no
+warning or confirmation is shown. Changes are saved atomically to the complete
+Markdown sidecar, then reparsed so recorded ranges and source highlights reflect
+the edited annotation document.
+
+In either pane's Edit mode, printable keys and Enter edit at the cursor. Ctrl+W
+deletes the previous word, Ctrl+H deletes the previous character, and Escape or
+Ctrl+`[` returns to Normal mode. Ctrl+Q remains available to quit. Source changes
+are saved atomically to the original file while preserving its UTF-8 BOM, newline
+style, and permissions.
+
+Source edits do not rewrite existing annotation ranges or quoted original text.
+Those annotations therefore continue to refer to their previously recorded
+Unicode offsets until source-change recovery is implemented.
 
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is
@@ -112,11 +140,12 @@ dimmed so the current note remains easy to identify.
 - One file per application launch
 - `.txt`, `.md`, and `.markdown` files
 - UTF-8 input, including files with a UTF-8 byte-order mark
-- Read-only display with line numbers and optional wrapping
+- Guarded source editing and direct annotation editing with atomic saving
+- Line numbers and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
 - Original quotation and source range recorded for every note
 - Literal search with forward/backward repetition in both panes
-- No annotation editing/deletion or source-change recovery yet
+- No annotation editing/deletion or automatic source-change recovery yet
 
 ## Test
 

@@ -384,6 +384,12 @@ class AnnotationStore:
         self._atomic_write(updated)
         return updated
 
+    def write(self, text: str) -> str:
+        """Atomically replace the complete annotation document."""
+
+        self._atomic_write(text)
+        return text
+
     def _atomic_write(self, text: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Optional[Path] = None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
@@ -68,6 +70,57 @@ def load_text_file(path_input: PathInput) -> LoadedTextFile:
         path=path.resolve(),
         text=text,
         size_bytes=len(raw),
+        line_count=line_count,
+    )
+
+
+def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
+    """Atomically save edited text while preserving basic file formatting."""
+
+    path = source.path
+    temporary_path = None
+    try:
+        original = path.read_bytes()
+        mode = path.stat().st_mode & 0o7777
+        has_bom = original.startswith(b"\xef\xbb\xbf")
+        content = original[3:] if has_bom else original
+        if b"\r\n" in content:
+            newline = "\r\n"
+        elif b"\r" in content:
+            newline = "\r"
+        else:
+            newline = "\n"
+
+        encoded = text.replace("\n", newline).encode("utf-8")
+        if has_bom:
+            encoded = b"\xef\xbb\xbf" + encoded
+
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            os.fchmod(temporary.fileno(), mode)
+            temporary.write(encoded)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    except OSError as error:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise TextFileError(f"cannot save {path}: {error}") from error
+
+    line_count = 0 if not text else text.count("\n") + 1
+    return LoadedTextFile(
+        path=path,
+        text=text,
+        size_bytes=len(encoded),
         line_count=line_count,
     )
 

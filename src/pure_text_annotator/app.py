@@ -11,6 +11,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.geometry import Offset
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -30,10 +31,11 @@ from .annotations import (
     parse_annotation_links,
 )
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
-from .files import LoadedTextFile
+from .files import LoadedTextFile, TextFileError, save_text_file
 
 
 ClipboardWriter = Callable[[str], Optional[str]]
+SourceWriter = Callable[[LoadedTextFile, str], LoadedTextFile]
 
 
 class SyncMode(str, Enum):
@@ -107,8 +109,61 @@ def _vim_word_start_location(text_area: TextArea) -> tuple[int, int]:
     return text_area.cursor_location
 
 
+def _vim_scroll_line(
+    text_area: TextArea, direction: int, *, select: bool = False
+) -> None:
+    """Scroll one visual line and keep the cursor inside the viewport."""
+
+    cursor_offset = text_area.wrapped_document.location_to_offset(
+        text_area.cursor_location
+    )
+    viewport_height = max(1, text_area.scrollable_content_region.height)
+    scroll_y = round(text_area.scroll_y)
+    target_y = max(0, min(scroll_y + direction, text_area.max_scroll_y))
+    if target_y == scroll_y:
+        return
+
+    text_area.scroll_to(
+        y=target_y,
+        animate=False,
+        immediate=True,
+    )
+    visible_top = target_y
+    visible_bottom = target_y + viewport_height - 1
+    if cursor_offset.y < visible_top:
+        cursor_offset = Offset(cursor_offset.x, visible_top)
+    elif cursor_offset.y > visible_bottom:
+        cursor_offset = Offset(cursor_offset.x, visible_bottom)
+    else:
+        return
+    text_area.move_cursor(
+        text_area.wrapped_document.offset_to_location(cursor_offset),
+        select=select,
+    )
+
+
+def _position_cursor_line(text_area: TextArea, placement: str) -> None:
+    """Place the cursor's visual line at the requested viewport position."""
+
+    cursor_y = text_area.wrapped_document.location_to_offset(
+        text_area.cursor_location
+    ).y
+    viewport_height = max(1, text_area.scrollable_content_region.height)
+    if placement == "top":
+        target_y = cursor_y
+    elif placement == "middle":
+        target_y = cursor_y - (viewport_height - 1) // 2
+    else:
+        target_y = cursor_y - viewport_height + 1
+    text_area.scroll_to(
+        y=target_y,
+        animate=False,
+        immediate=True,
+    )
+
+
 class VimTextArea(TextArea):
-    """A read-only TextArea with a small, predictable Vim key set."""
+    """A guarded editable TextArea with a small, predictable Vim key set."""
 
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
         "text-area--annotation",
@@ -117,6 +172,7 @@ class VimTextArea(TextArea):
     }
 
     visual_mode = reactive(False)
+    edit_mode = reactive(False)
 
     BINDINGS = [
         Binding("h,left", "vim_left", "Left", show=False),
@@ -139,6 +195,10 @@ class VimTextArea(TextArea):
         ),
         Binding("pageup,ctrl+b,ctrl+u", "vim_page_up", "Page up", show=False),
         Binding(
+            "ctrl+e", "vim_scroll_down_line", "Scroll down", show=False
+        ),
+        Binding("ctrl+y", "vim_scroll_up_line", "Scroll up", show=False),
+        Binding(
             "shift+pagedown", "vim_page_down(True)", "Select page down", show=False
         ),
         Binding(
@@ -146,7 +206,14 @@ class VimTextArea(TextArea):
         ),
         Binding("v", "toggle_visual", "Visual selection", show=False),
         Binding("a", "annotate", "Add annotation", show=False),
-        Binding("escape", "cancel_visual", "Clear selection", show=False),
+        Binding("i", "request_edit", "Edit source", show=False),
+        Binding(
+            "escape,ctrl+left_square_bracket",
+            "exit_edit",
+            "Return to Normal mode",
+            show=False,
+        ),
+        Binding("ctrl+h", "delete_left", "Delete left", show=False),
         Binding("y", "yank", "Copy selection", show=False),
         Binding(
             "ctrl+c,super+c", "copy_selection", "Copy selection", show=False
@@ -169,6 +236,9 @@ class VimTextArea(TextArea):
         def __init__(self, selection: Selection) -> None:
             super().__init__()
             self.selection = selection
+
+    class EditRequested(Message):
+        """Request confirmation before editing the original source file."""
 
     def __init__(
         self,
@@ -336,6 +406,36 @@ class VimTextArea(TextArea):
     def _should_select(self, force_select: bool = False) -> bool:
         return force_select or self.visual_mode
 
+    def check_action(
+        self, action: str, parameters: tuple[object, ...]
+    ) -> bool | None:
+        normal_mode_actions = {
+            "vim_left",
+            "vim_right",
+            "vim_up",
+            "vim_down",
+            "vim_word_left",
+            "vim_word_right",
+            "vim_word_end",
+            "vim_line_start",
+            "vim_line_end",
+            "vim_document_start",
+            "vim_document_end",
+            "vim_page_down",
+            "vim_page_up",
+            "vim_scroll_down_line",
+            "vim_scroll_up_line",
+            "toggle_visual",
+            "annotate",
+            "request_edit",
+            "yank",
+        }
+        if self.edit_mode and action in normal_mode_actions:
+            return False
+        if not self.edit_mode and action in {"delete_left", "delete_word_left"}:
+            return False
+        return super().check_action(action, parameters)
+
     def action_vim_left(self, force_select: bool = False) -> None:
         self.action_cursor_left(self._should_select(force_select))
 
@@ -389,6 +489,12 @@ class VimTextArea(TextArea):
     def action_vim_page_up(self, force_select: bool = False) -> None:
         self._move_page(down=False, force_select=force_select)
 
+    def action_vim_scroll_down_line(self) -> None:
+        _vim_scroll_line(self, 1, select=self.visual_mode)
+
+    def action_vim_scroll_up_line(self) -> None:
+        _vim_scroll_line(self, -1, select=self.visual_mode)
+
     def action_toggle_visual(self) -> None:
         if self.visual_mode:
             self.action_cancel_visual()
@@ -399,6 +505,35 @@ class VimTextArea(TextArea):
 
     def action_annotate(self) -> None:
         self.post_message(self.AnnotationRequested(self.selection))
+
+    def action_request_edit(self) -> None:
+        self.post_message(self.EditRequested())
+
+    def enter_edit_mode(self) -> None:
+        """Make the source buffer editable after external confirmation."""
+
+        if self.visual_mode:
+            self.action_cancel_visual()
+        self.selection = Selection.cursor(self.cursor_location)
+        self.read_only = False
+        self.edit_mode = True
+        self.post_message(self.ModeChanged())
+
+    def leave_edit_mode(self) -> None:
+        """Return the source buffer to guarded Normal mode."""
+
+        if not self.edit_mode:
+            return
+        self.read_only = True
+        self.edit_mode = False
+        self.selection = Selection.cursor(self.cursor_location)
+        self.post_message(self.ModeChanged())
+
+    def action_exit_edit(self) -> None:
+        if self.edit_mode:
+            self.leave_edit_mode()
+        else:
+            self.action_cancel_visual()
 
     def action_cancel_visual(self) -> None:
         self.visual_mode = False
@@ -419,7 +554,7 @@ class VimTextArea(TextArea):
 
 
 class AnnotationTextArea(TextArea):
-    """Read-only sidecar view whose cursor tracks annotation entries."""
+    """Guarded sidecar editor whose cursor tracks annotation entries."""
 
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
         "text-area--active-annotation",
@@ -429,6 +564,8 @@ class AnnotationTextArea(TextArea):
         "text-area--search-match",
     }
 
+    edit_mode = reactive(False)
+
     BINDINGS = [
         Binding("h,left", "cursor_left", "Left", show=False),
         Binding("j,down", "cursor_down", "Down", show=False),
@@ -436,6 +573,14 @@ class AnnotationTextArea(TextArea):
         Binding("l,right", "cursor_right", "Right", show=False),
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
         Binding("e", "vim_word_end", "End of word", show=False),
+        Binding("i", "request_edit", "Edit annotations", show=False),
+        Binding(
+            "escape,ctrl+left_square_bracket",
+            "exit_edit",
+            "Return to Normal mode",
+            show=False,
+        ),
+        Binding("ctrl+h", "delete_left", "Delete left", show=False),
         Binding("0,home", "cursor_line_start", "Line start", show=False),
         Binding("$,end", "cursor_line_end", "Line end", show=False),
         Binding("g", "document_start", "Document start", show=False),
@@ -446,7 +591,17 @@ class AnnotationTextArea(TextArea):
         Binding(
             "pageup,ctrl+b,ctrl+u", "cursor_page_up", "Page up", show=False
         ),
+        Binding(
+            "ctrl+e", "vim_scroll_down_line", "Scroll down", show=False
+        ),
+        Binding("ctrl+y", "vim_scroll_up_line", "Scroll up", show=False),
     ]
+
+    class ModeChanged(Message):
+        """Posted when annotation Edit mode changes."""
+
+    class EditRequested(Message):
+        """Request immediate Edit mode for the annotation sidecar."""
 
     def __init__(
         self,
@@ -471,6 +626,32 @@ class AnnotationTextArea(TextArea):
         self._quote_lines: frozenset[int] = frozenset()
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self.set_annotation_links(annotation_links)
+
+    def check_action(
+        self, action: str, parameters: tuple[object, ...]
+    ) -> bool | None:
+        normal_mode_actions = {
+            "cursor_left",
+            "cursor_right",
+            "cursor_up",
+            "cursor_down",
+            "vim_word_right",
+            "vim_word_end",
+            "cursor_line_start",
+            "cursor_line_end",
+            "document_start",
+            "document_end",
+            "cursor_page_down",
+            "cursor_page_up",
+            "vim_scroll_down_line",
+            "vim_scroll_up_line",
+            "request_edit",
+        }
+        if self.edit_mode and action in normal_mode_actions:
+            return False
+        if not self.edit_mode and action in {"delete_left", "delete_word_left"}:
+            return False
+        return super().check_action(action, parameters)
 
     @property
     def active_link(self) -> Optional[AnnotationLink]:
@@ -618,6 +799,32 @@ class AnnotationTextArea(TextArea):
     def action_vim_word_right(self) -> None:
         self.move_cursor(_vim_word_start_location(self))
 
+    def action_vim_scroll_down_line(self) -> None:
+        _vim_scroll_line(self, 1)
+
+    def action_vim_scroll_up_line(self) -> None:
+        _vim_scroll_line(self, -1)
+
+    def action_request_edit(self) -> None:
+        self.post_message(self.EditRequested())
+
+    def enter_edit_mode(self) -> None:
+        self.selection = Selection.cursor(self.cursor_location)
+        self.read_only = False
+        self.edit_mode = True
+        self.post_message(self.ModeChanged())
+
+    def leave_edit_mode(self) -> None:
+        if not self.edit_mode:
+            return
+        self.read_only = True
+        self.edit_mode = False
+        self.selection = Selection.cursor(self.cursor_location)
+        self.post_message(self.ModeChanged())
+
+    def action_exit_edit(self) -> None:
+        self.leave_edit_mode()
+
 
 class SearchInput(Input):
     """Compact Vim-style search prompt with explicit cancellation."""
@@ -753,6 +960,130 @@ class NoteModal(ModalScreen[Optional[str]]):
         self.action_cancel()
 
 
+class EditWarningModal(ModalScreen[bool]):
+    """Require an explicit confirmation before editing the source file."""
+
+    CSS = """
+    EditWarningModal {
+        align: center middle;
+    }
+
+    #edit-warning-dialog {
+        width: 72%;
+        max-width: 78;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #edit-warning-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #edit-warning-message,
+    #edit-warning-path,
+    #edit-warning-annotations {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #edit-warning-path,
+    #edit-warning-annotations {
+        color: $text-muted;
+    }
+
+    #edit-confirmation {
+        height: 3;
+        margin-bottom: 1;
+        border: solid $warning;
+    }
+
+    #edit-warning-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #edit-warning-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(self, source_path: str) -> None:
+        super().__init__()
+        self.source_path = source_path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-warning-dialog"):
+            yield Static(
+                "Warning: edit original source",
+                markup=False,
+                id="edit-warning-title",
+            )
+            yield Static(
+                "Edit mode writes every change directly to the original file.",
+                markup=False,
+                id="edit-warning-message",
+            )
+            yield Static(
+                self.source_path,
+                markup=False,
+                id="edit-warning-path",
+            )
+            yield Static(
+                "Existing annotation ranges are not rewritten automatically.",
+                markup=False,
+                id="edit-warning-annotations",
+            )
+            yield Input(
+                placeholder='Type "Yes" exactly to proceed',
+                id="edit-confirmation",
+            )
+            with Horizontal(id="edit-warning-buttons"):
+                yield Button("Cancel", id="cancel-edit")
+                yield Button(
+                    "Edit original",
+                    variant="warning",
+                    id="confirm-edit",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#edit-confirmation", Input).focus()
+
+    def action_confirm(self) -> None:
+        confirmation = self.query_one("#edit-confirmation", Input).value
+        if confirmation != "Yes":
+            self.notify(
+                'Type "Yes" exactly to enter Edit mode',
+                severity="warning",
+                timeout=1.75,
+            )
+            return
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Input.Submitted, "#edit-confirmation")
+    def on_confirmation_submitted(self, _event: Input.Submitted) -> None:
+        self.action_confirm()
+
+    @on(Button.Pressed, "#confirm-edit")
+    def on_confirm_pressed(self, _event: Button.Pressed) -> None:
+        self.action_confirm()
+
+    @on(Button.Pressed, "#cancel-edit")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
 class ViewerApp(App[None]):
     """Display one source file beside its persistent annotation sidecar."""
 
@@ -865,7 +1196,13 @@ class ViewerApp(App[None]):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
+        Binding(
+            "ctrl+q",
+            "force_quit",
+            "Quit",
+            show=False,
+            priority=True,
+        ),
         Binding(
             "ctrl+w",
             "start_pane_switch",
@@ -895,6 +1232,27 @@ class ViewerApp(App[None]):
             show=False,
         ),
         Binding(".", "align_panes", "Align focused pane", show=False),
+        Binding(
+            "z",
+            "scroll_position_prefix_or_middle",
+            "Scroll-position prefix",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "t",
+            "scroll_cursor_top",
+            "Cursor line at top",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "b",
+            "scroll_cursor_bottom",
+            "Cursor line at bottom",
+            show=False,
+            priority=True,
+        ),
     ]
 
     def __init__(
@@ -903,15 +1261,19 @@ class ViewerApp(App[None]):
         *,
         soft_wrap: bool = True,
         clipboard_writer: ClipboardWriter = copy_to_system_clipboard,
+        source_writer: SourceWriter = save_text_file,
         annotation_store: Optional[AnnotationStore] = None,
     ) -> None:
         super().__init__()
         self.source = source
         self.soft_wrap = soft_wrap
         self._clipboard_writer = clipboard_writer
+        self._source_writer = source_writer
         self.last_copy_backend: Optional[str] = None
         self._pane_switch_pending = False
         self._pane_switch_timer: Optional[Timer] = None
+        self._scroll_position_pending = False
+        self._scroll_position_timer: Optional[Timer] = None
         self._search_target_id: Optional[str] = None
         self._search_queries: dict[str, str] = {}
         self._search_matches: dict[str, AnnotationRange] = {}
@@ -925,6 +1287,9 @@ class ViewerApp(App[None]):
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
         )
+        self._rebuild_source_line_starts()
+
+    def _rebuild_source_line_starts(self) -> None:
         self._source_line_starts = [0]
         self._source_line_starts.extend(
             index + 1
@@ -933,12 +1298,7 @@ class ViewerApp(App[None]):
         )
 
     def compose(self) -> ComposeResult:
-        size = self._format_size(self.source.size_bytes)
-        top_line = (
-            f"{self.source.path}  |  {self.source.line_count} lines  |  {size}"
-            f"  |  notes: {self.annotation_store.path.name}"
-        )
-        yield Static(top_line, markup=False, id="titlebar")
+        yield Static(self._titlebar_text(), markup=False, id="titlebar")
         with Horizontal(id="workspace"):
             viewer = VimTextArea(
                 self.source.text,
@@ -963,8 +1323,7 @@ class ViewerApp(App[None]):
             id="search-input",
         )
         yield Static(
-            "Tab/Ctrl-W W panes  S sync mode  . align  h/j/k/l move  "
-            "/ search  n/N repeat  v select  a annotate  q quit",
+            self._normal_help_text(),
             markup=False,
             id="help",
         )
@@ -981,6 +1340,31 @@ class ViewerApp(App[None]):
         if size_bytes < 1024 * 1024:
             return f"{size_bytes / 1024:.1f} KiB"
         return f"{size_bytes / (1024 * 1024):.1f} MiB"
+
+    def _titlebar_text(self) -> str:
+        size = self._format_size(self.source.size_bytes)
+        return (
+            f"{self.source.path}  |  {self.source.line_count} lines  |  {size}"
+            f"  |  notes: {self.annotation_store.path.name}"
+        )
+
+    @staticmethod
+    def _normal_help_text() -> str:
+        return (
+            "Tab/Ctrl-W W panes  i edit  S sync mode  . align  "
+            "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
+            "/ search  n/N repeat  v select  a annotate  q quit"
+        )
+
+    @staticmethod
+    def _edit_help_text() -> str:
+        return (
+            "EDIT MODE  type to insert  Ctrl-W delete word  "
+            "Ctrl-H delete char  Esc/Ctrl-[ normal  Ctrl-Q quit"
+        )
+
+    def _refresh_titlebar(self) -> None:
+        self.query_one("#titlebar", Static).update(self._titlebar_text())
 
     def _valid_annotation_links(self) -> tuple[AnnotationLink, ...]:
         source_length = len(self.source.text)
@@ -1092,18 +1476,41 @@ class ViewerApp(App[None]):
         )
 
     def _refresh_status(self) -> None:
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        target: TextArea = annotator if annotator.has_focus else viewer
+        edit_mode = (
+            viewer.edit_mode
+            if target is viewer
+            else annotator.edit_mode
+        )
+        self.query_one("#help", Static).update(
+            self._edit_help_text()
+            if edit_mode
+            else self._normal_help_text()
+        )
         if self._pane_switch_pending:
             self.query_one("#status", Static).update(
                 "CTRL-W  |  press w to switch panes"
             )
             return
+        if self._scroll_position_pending:
+            self.query_one("#status", Static).update(
+                "Z  |  press t, z, or b to place the cursor line"
+            )
+            return
 
-        viewer = self.query_one("#viewer", VimTextArea)
-        row, column = viewer.cursor_location
-        selected = viewer.selected_text
-        mode = "VISUAL" if viewer.visual_mode else "NORMAL"
+        row, column = target.cursor_location
+        selected = target.selected_text
+        mode = (
+            "EDIT"
+            if edit_mode
+            else "VISUAL"
+            if target is viewer and viewer.visual_mode
+            else "NORMAL"
+        )
         selection_info = f"  |  {len(selected)} chars selected" if selected else ""
-        wrap_info = "wrap" if viewer.soft_wrap else "no wrap"
+        wrap_info = "wrap" if target.soft_wrap else "no wrap"
         self.query_one("#status", Static).update(
             f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
             f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}{selection_info}"
@@ -1226,6 +1633,8 @@ class ViewerApp(App[None]):
             return
         if self._pane_switch_pending:
             self._clear_pane_switch_prefix()
+        if self._scroll_position_pending:
+            self._clear_scroll_position_prefix()
         if isinstance(target, VimTextArea) and target.visual_mode:
             target.action_cancel_visual()
 
@@ -1283,22 +1692,56 @@ class ViewerApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         search_input = self.query_one("#search-input", SearchInput)
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        editing_pane = (
+            viewer.edit_mode
+            and viewer.has_focus
+            or annotator.edit_mode
+            and annotator.has_focus
+        )
+        if editing_pane and action in {
+            "quit",
+            "start_pane_switch",
+            "finish_pane_switch",
+            "start_search",
+            "search_next",
+            "search_previous",
+            "cycle_sync_mode",
+            "align_panes",
+            "scroll_position_prefix_or_middle",
+            "scroll_cursor_top",
+            "scroll_cursor_bottom",
+        }:
+            return False
+        modal_open = isinstance(self.screen, ModalScreen)
         if action in {
             "start_search",
             "search_next",
             "search_previous",
         }:
-            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+            if modal_open or search_input.has_focus:
                 return False
-        if action in {"cycle_sync_mode", "align_panes"}:
-            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+        if action in {
+            "cycle_sync_mode",
+            "align_panes",
+            "scroll_position_prefix_or_middle",
+            "scroll_cursor_top",
+            "scroll_cursor_bottom",
+        }:
+            if modal_open or search_input.has_focus:
                 return False
         if action in {"start_pane_switch", "finish_pane_switch"}:
-            if isinstance(self.screen, NoteModal) or search_input.has_focus:
+            if modal_open or search_input.has_focus:
                 return False
         if action == "finish_pane_switch":
             return self._pane_switch_pending
+        if action in {"scroll_cursor_top", "scroll_cursor_bottom"}:
+            return self._scroll_position_pending
         return super().check_action(action, parameters)
+
+    def action_force_quit(self) -> None:
+        self.exit()
 
     def _clear_pane_switch_prefix(self) -> None:
         self._pane_switch_pending = False
@@ -1306,6 +1749,8 @@ class ViewerApp(App[None]):
         self._refresh_status()
 
     def action_start_pane_switch(self) -> None:
+        if self._scroll_position_pending:
+            self._clear_scroll_position_prefix()
         self._pane_switch_pending = True
         if self._pane_switch_timer is not None:
             self._pane_switch_timer.stop()
@@ -1328,12 +1773,167 @@ class ViewerApp(App[None]):
             viewer.focus()
         self._refresh_status()
 
+    def _clear_scroll_position_prefix(self) -> None:
+        self._scroll_position_pending = False
+        self._scroll_position_timer = None
+        self._refresh_status()
+
+    def action_scroll_position_prefix_or_middle(self) -> None:
+        """Start a z command, or complete ``zz`` when already pending."""
+
+        if self._scroll_position_pending:
+            self._finish_scroll_position("middle")
+            return
+        if self._pane_switch_pending:
+            self._clear_pane_switch_prefix()
+        self._scroll_position_pending = True
+        if self._scroll_position_timer is not None:
+            self._scroll_position_timer.stop()
+        self._scroll_position_timer = self.set_timer(
+            1.5, self._clear_scroll_position_prefix
+        )
+        self._refresh_status()
+
+    def _finish_scroll_position(self, placement: str) -> None:
+        self._scroll_position_pending = False
+        if self._scroll_position_timer is not None:
+            self._scroll_position_timer.stop()
+            self._scroll_position_timer = None
+        target = self._focused_search_target()
+        if target is not None:
+            _position_cursor_line(target, placement)
+        self._refresh_status()
+
+    def action_scroll_cursor_top(self) -> None:
+        self._finish_scroll_position("top")
+
+    def action_scroll_cursor_bottom(self) -> None:
+        self._finish_scroll_position("bottom")
+
+    @on(VimTextArea.EditRequested)
+    def on_edit_requested(self, event: VimTextArea.EditRequested) -> None:
+        """Ask for an exact confirmation before enabling source edits."""
+
+        event.stop()
+        viewer = self.query_one("#viewer", VimTextArea)
+        if not viewer.has_focus or viewer.edit_mode:
+            return
+        if self._pane_switch_pending:
+            self._clear_pane_switch_prefix()
+        if self._scroll_position_pending:
+            self._clear_scroll_position_prefix()
+        self.push_screen(
+            EditWarningModal(str(self.source.path)),
+            callback=self._finish_edit_confirmation,
+        )
+
+    def _finish_edit_confirmation(self, confirmed: bool) -> None:
+        viewer = self.query_one("#viewer", VimTextArea)
+        viewer.focus()
+        if confirmed:
+            self.query_one(
+                "#annotator", AnnotationTextArea
+            ).leave_edit_mode()
+            viewer.enter_edit_mode()
+
+    @on(TextArea.Changed, "#viewer")
+    def on_viewer_changed(self, event: TextArea.Changed) -> None:
+        """Persist each source edit atomically and refresh source metadata."""
+
+        viewer = event.text_area
+        assert isinstance(viewer, VimTextArea)
+        if not viewer.edit_mode:
+            return
+
+        try:
+            saved_source = self._source_writer(self.source, viewer.text)
+        except TextFileError as error:
+            cursor_row, cursor_column = viewer.cursor_location
+            viewer.leave_edit_mode()
+            viewer.load_text(self.source.text)
+            lines = self.source.text.split("\n")
+            cursor_row = min(cursor_row, len(lines) - 1)
+            cursor_column = min(cursor_column, len(lines[cursor_row]))
+            viewer.move_cursor((cursor_row, cursor_column))
+            viewer.set_annotation_ranges(self.annotation_ranges)
+            self.notify(
+                f"{error}; the unsaved edit was reverted",
+                severity="error",
+                timeout=5,
+            )
+            return
+
+        self.source = saved_source
+        self._rebuild_source_line_starts()
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        self._set_search_match("viewer", None)
+        self._refresh_titlebar()
+        self._refresh_status()
+
+    @on(AnnotationTextArea.EditRequested)
+    def on_annotation_edit_requested(
+        self, event: AnnotationTextArea.EditRequested
+    ) -> None:
+        """Enter annotation Edit mode immediately, without a warning."""
+
+        event.stop()
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if not annotator.has_focus or annotator.edit_mode:
+            return
+        if self._pane_switch_pending:
+            self._clear_pane_switch_prefix()
+        if self._scroll_position_pending:
+            self._clear_scroll_position_prefix()
+        self.query_one("#viewer", VimTextArea).leave_edit_mode()
+        annotator.enter_edit_mode()
+
+    @on(TextArea.Changed, "#annotator")
+    def on_annotator_changed(self, event: TextArea.Changed) -> None:
+        """Persist sidecar edits and rebuild annotation relationships."""
+
+        annotator = event.text_area
+        assert isinstance(annotator, AnnotationTextArea)
+        if not annotator.edit_mode:
+            return
+
+        try:
+            updated = self.annotation_store.write(annotator.text)
+        except AnnotationFileError as error:
+            cursor_row, cursor_column = annotator.cursor_location
+            annotator.leave_edit_mode()
+            annotator.load_text(self.annotation_text)
+            lines = self.annotation_text.split("\n")
+            cursor_row = min(cursor_row, len(lines) - 1)
+            cursor_column = min(cursor_column, len(lines[cursor_row]))
+            annotator.move_cursor((cursor_row, cursor_column))
+            annotator.set_annotation_links(self.annotation_links)
+            self.notify(
+                f"{error}; the unsaved edit was reverted",
+                severity="error",
+                timeout=5,
+            )
+            return
+
+        self.annotation_text = updated
+        self.annotation_links = parse_annotation_links(updated)
+        self.annotation_ranges = tuple(
+            link.source_range for link in self.annotation_links
+        )
+        annotator.set_annotation_links(self.annotation_links)
+        self.query_one("#viewer", VimTextArea).set_annotation_ranges(
+            self.annotation_ranges
+        )
+        self._set_search_match("annotator", None)
+        self._refresh_status()
+
     @on(TextArea.SelectionChanged, "#viewer")
     def on_viewer_selection_changed(self, _event: TextArea.SelectionChanged) -> None:
         self._clear_stale_search_match("viewer")
         self._refresh_status()
+        viewer = self.query_one("#viewer", VimTextArea)
         if (
-            self.query_one("#viewer", VimTextArea).has_focus
+            viewer.has_focus
+            and not viewer.edit_mode
             and self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}
         ):
             self._align_annotation_to_source()
@@ -1343,7 +1943,9 @@ class ViewerApp(App[None]):
         self, _event: TextArea.SelectionChanged
     ) -> None:
         self._clear_stale_search_match("annotator")
-        if self.query_one("#annotator", AnnotationTextArea).has_focus:
+        self._refresh_status()
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if annotator.has_focus and not annotator.edit_mode:
             if self.sync_mode is SyncMode.SYNC:
                 self._align_source_to_annotation()
             else:
@@ -1381,6 +1983,25 @@ class ViewerApp(App[None]):
     @on(VimTextArea.ModeChanged)
     def on_viewer_mode_changed(self, _event: VimTextArea.ModeChanged) -> None:
         self._refresh_status()
+        viewer = self.query_one("#viewer", VimTextArea)
+        if (
+            viewer.has_focus
+            and not viewer.edit_mode
+            and self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}
+        ):
+            self._align_annotation_to_source()
+
+    @on(AnnotationTextArea.ModeChanged)
+    def on_annotator_mode_changed(
+        self, _event: AnnotationTextArea.ModeChanged
+    ) -> None:
+        self._refresh_status()
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if annotator.has_focus and not annotator.edit_mode:
+            if self.sync_mode is SyncMode.SYNC:
+                self._align_source_to_annotation()
+            else:
+                self._focus_annotation_at_cursor()
 
     @on(VimTextArea.AnnotationRequested)
     def on_annotation_requested(self, event: VimTextArea.AnnotationRequested) -> None:

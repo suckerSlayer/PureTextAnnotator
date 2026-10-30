@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from textual.widgets import TextArea
+from textual.widgets import Input, Static, TextArea
 
 from pure_text_annotator.annotations import (
     AnnotationDraft,
@@ -11,13 +11,14 @@ from pure_text_annotator.annotations import (
 )
 from pure_text_annotator.app import (
     AnnotationTextArea,
+    EditWarningModal,
     NoteModal,
     SearchInput,
     SyncMode,
     ViewerApp,
     VimTextArea,
 )
-from pure_text_annotator.files import LoadedTextFile, load_text_file
+from pure_text_annotator.files import LoadedTextFile, TextFileError, load_text_file
 
 
 def make_source(text: str) -> LoadedTextFile:
@@ -47,8 +48,181 @@ def test_viewer_is_read_only_and_supports_vim_movement() -> None:
             assert viewer.cursor_location == (1, 4)
 
             original = viewer.text
-            await pilot.press("i", "x", "backspace", "delete")
+            await pilot.press("x", "backspace", "delete")
             assert viewer.text == original
+
+    asyncio.run(scenario())
+
+
+def test_source_edit_mode_requires_literal_capital_yes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+
+            await pilot.press("i")
+            await pilot.pause()
+            assert isinstance(app.screen, EditWarningModal)
+            assert viewer.read_only is True
+            assert viewer.edit_mode is False
+
+            confirmation = app.screen.query_one("#edit-confirmation", Input)
+            confirmation.value = "yes"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, EditWarningModal)
+            assert viewer.edit_mode is False
+
+            confirmation.value = "Yes"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not isinstance(app.screen, EditWarningModal)
+            assert viewer.read_only is False
+            assert viewer.edit_mode is True
+
+    asyncio.run(scenario())
+
+
+def test_edit_mode_writes_source_and_supports_vim_exit_keys(
+    tmp_path: Path,
+) -> None:
+    async def confirm_edit(pilot, app: ViewerApp) -> None:
+        await pilot.press("i")
+        await pilot.pause()
+        confirmation = app.screen.query_one("#edit-confirmation", Input)
+        confirmation.value = "Yes"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha beta", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("G")
+            await confirm_edit(pilot, app)
+
+            assert app.query_one("#status", Static).render().plain.startswith(
+                "EDIT"
+            )
+            await pilot.press("q", "w", "i", "z", "t", "b")
+            await pilot.pause()
+            assert viewer.text == "alpha betaqwiztb"
+            assert source_path.read_text(encoding="utf-8") == viewer.text
+
+            await pilot.press("ctrl+w")
+            await pilot.pause()
+            assert viewer.text == "alpha "
+            await pilot.press("ctrl+h", "!", "enter", "z")
+            await pilot.pause()
+            assert viewer.text == "alpha!\nz"
+            assert source_path.read_text(encoding="utf-8") == "alpha!\nz"
+
+            await pilot.press("ctrl+left_square_bracket")
+            await pilot.pause()
+            assert viewer.edit_mode is False
+            assert viewer.read_only is True
+
+            await pilot.press("x")
+            assert viewer.text == "alpha!\nz"
+
+            await confirm_edit(pilot, app)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert viewer.edit_mode is False
+            assert viewer.read_only is True
+
+    asyncio.run(scenario())
+
+
+def test_failed_source_save_reverts_the_edit(tmp_path: Path) -> None:
+    def fail_to_save(
+        _source: LoadedTextFile, _text: str
+    ) -> LoadedTextFile:
+        raise TextFileError("simulated save failure")
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path),
+            clipboard_writer=lambda _text: "test",
+            source_writer=fail_to_save,
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("i")
+            await pilot.pause()
+            confirmation = app.screen.query_one("#edit-confirmation", Input)
+            confirmation.value = "Yes"
+            await pilot.press("enter", "x")
+            await pilot.pause()
+
+            assert viewer.text == "alpha"
+            assert source_path.read_text(encoding="utf-8") == "alpha"
+            assert viewer.edit_mode is False
+            assert viewer.read_only is True
+
+    asyncio.run(scenario())
+
+
+def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.press("tab", "G", "i")
+            await pilot.pause()
+
+            assert annotator.has_focus
+            assert annotator.edit_mode is True
+            assert annotator.read_only is False
+            assert not isinstance(app.screen, EditWarningModal)
+            assert app.query_one("#status", Static).render().plain.startswith(
+                "EDIT"
+            )
+
+            await pilot.press("q", "w", "i", "z", "t", "b")
+            await pilot.pause()
+            assert annotator.text.endswith("qwiztb")
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == annotator.text
+
+            await pilot.press("ctrl+w", "x", "ctrl+h", "n", "o", "t", "e")
+            await pilot.pause()
+            assert annotator.text.endswith("note")
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == annotator.text
+            assert viewer.text == "alpha"
+
+            await pilot.press("ctrl+left_square_bracket")
+            await pilot.pause()
+            assert annotator.edit_mode is False
+            assert annotator.read_only is True
+
+            original = annotator.text
+            await pilot.press("x")
+            assert annotator.text == original
 
     asyncio.run(scenario())
 
@@ -732,6 +906,72 @@ def test_ctrl_w_w_switches_panes_without_breaking_word_motion() -> None:
             await pilot.press("ctrl+w", "w")
             assert viewer.has_focus
             assert app._pane_switch_pending is False
+
+    asyncio.run(scenario())
+
+
+def test_vim_line_scrolling_and_cursor_placement_in_both_panes(
+    tmp_path: Path,
+) -> None:
+    async def verify_pane(pilot, pane: TextArea) -> None:
+        pane.focus()
+        pane.move_cursor((50, 0), center=True)
+        await pilot.pause()
+        viewport_height = pane.scrollable_content_region.height
+        cursor_location = pane.cursor_location
+
+        await pilot.press("z", "t")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 50
+        assert pane.cursor_location == cursor_location
+
+        await pilot.press("z", "z")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 50 - (viewport_height - 1) // 2
+        assert pane.cursor_location == cursor_location
+
+        await pilot.press("ctrl+e")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 51 - (viewport_height - 1) // 2
+        assert pane.cursor_location == cursor_location
+
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 50 - (viewport_height - 1) // 2
+        assert pane.cursor_location == cursor_location
+
+        await pilot.press("z", "b")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 50 - viewport_height + 1
+        assert pane.cursor_location == cursor_location
+
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 50 - viewport_height
+        assert pane.cursor_location == (49, 0)
+
+        pane.move_cursor((50, 0))
+        await pilot.press("z", "t", "ctrl+e")
+        await pilot.pause()
+        assert round(pane.scroll_y) == 51
+        assert pane.cursor_location == (51, 0)
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_text = "\n".join(f"source {line}" for line in range(100))
+        source_path.write_text(source_text, encoding="utf-8")
+        annotation_path = tmp_path / "source.md.annotations.md"
+        annotation_path.write_text(
+            "\n".join(f"annotation {line}" for line in range(100)),
+            encoding="utf-8",
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            await verify_pane(pilot, app.query_one(VimTextArea))
+            await verify_pane(pilot, app.query_one(AnnotationTextArea))
 
     asyncio.run(scenario())
 
