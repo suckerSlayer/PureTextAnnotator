@@ -36,7 +36,10 @@ def test_viewer_is_read_only_and_supports_vim_movement() -> None:
         app = ViewerApp(make_source("alpha\nbeta\ngamma"), clipboard_writer=lambda _text: "test")
         async with app.run_test(size=(80, 16)) as pilot:
             viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
             assert viewer.read_only is True
+            assert viewer.show_line_numbers is True
+            assert annotator.show_line_numbers is True
             assert viewer.cursor_location == (0, 0)
 
             await pilot.press("j", "l", "l")
@@ -115,9 +118,11 @@ def test_edit_mode_buffers_source_and_supports_vim_exit_keys(
             assert app.query_one("#status", Static).render().plain.startswith(
                 "EDIT"
             )
-            await pilot.press("q", "w", "i", "z", "t", "b", "u")
+            await pilot.press(
+                "q", "w", "i", "z", "o", "c", "t", "b", "u"
+            )
             await pilot.pause()
-            assert viewer.text == "alpha betaqwiztbu"
+            assert viewer.text == "alpha betaqwizoctbu"
             assert source_path.read_text(encoding="utf-8") == "alpha beta"
             assert "MODIFIED: source" in app.query_one(
                 "#status", Static
@@ -276,9 +281,11 @@ def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
                 "EDIT"
             )
 
-            await pilot.press("q", "w", "i", "z", "t", "b", "u")
+            await pilot.press(
+                "q", "w", "i", "z", "o", "c", "t", "b", "u"
+            )
             await pilot.pause()
-            assert annotator.text.endswith("qwiztbu")
+            assert annotator.text.endswith("qwizoctbu")
             assert not app.annotation_store.path.exists()
 
             await pilot.press("ctrl+w", "x", "ctrl+h", "n", "o", "t", "e")
@@ -380,20 +387,20 @@ def test_normal_undo_and_redo_buffered_edits_in_both_panes(
             initial_annotations = app.annotation_store.initial_text()
             await pilot.press("tab", "G", "i", "x", "y", "z", "escape")
             await pilot.pause()
-            assert annotator.text == initial_annotations + "xyz"
+            assert annotator.canonical_text == initial_annotations + "xyz"
 
             await pilot.press("u")
             await pilot.pause()
-            assert annotator.text == initial_annotations
+            assert annotator.canonical_text == initial_annotations
             assert not app.annotation_store.path.exists()
 
             await pilot.press("ctrl+r")
             await pilot.pause()
-            assert annotator.text == initial_annotations + "xyz"
+            assert annotator.canonical_text == initial_annotations + "xyz"
             assert not app.annotation_store.path.exists()
             await pilot.press("u")
             await pilot.pause()
-            assert annotator.text == initial_annotations
+            assert annotator.canonical_text == initial_annotations
 
     asyncio.run(scenario())
 
@@ -423,7 +430,7 @@ def test_e_moves_to_word_ends_in_both_panes(tmp_path: Path) -> None:
             await pilot.press("e")
             assert viewer.cursor_location == (2, 4)
 
-            await pilot.press("tab", "e")
+            await pilot.press("tab", "z", "i", "e")
             assert annotator.cursor_location == (0, 2)
             await pilot.press("e")
             assert annotator.cursor_location == (1, 5)
@@ -460,7 +467,7 @@ def test_w_moves_to_word_starts_in_both_panes(tmp_path: Path) -> None:
             await pilot.press("w")
             assert viewer.cursor_location == (2, 7)
 
-            await pilot.press("tab", "w")
+            await pilot.press("tab", "z", "i", "w")
             assert annotator.cursor_location == (1, 0)
             await pilot.press("w")
             assert annotator.cursor_location == (1, 6)
@@ -590,9 +597,12 @@ def test_annotation_flow_saves_sidecar_and_refreshes_pane(tmp_path: Path) -> Non
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(120, 28)) as pilot:
-            annotator = app.query_one("#annotator", TextArea)
+            annotator = app.query_one(AnnotationTextArea)
             assert annotator.read_only is True
-            assert annotator.text == app.annotation_store.initial_text()
+            assert (
+                annotator.canonical_text
+                == app.annotation_store.initial_text()
+            )
 
             await pilot.press("v", "l", "l", "a")
             await pilot.pause()
@@ -609,7 +619,7 @@ def test_annotation_flow_saves_sidecar_and_refreshes_pane(tmp_path: Path) -> Non
             assert "  end: 2" in saved
             assert "> al" in saved
             assert "My first **note**." in saved
-            assert app.query_one("#annotator", TextArea).text == saved
+            assert annotator.canonical_text == saved
             viewer = app.query_one(VimTextArea)
             assert viewer.selected_text == ""
             assert viewer.annotation_ranges == (AnnotationRange(0, 2),)
@@ -766,10 +776,13 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             await pilot.press("shift+s")
             assert app.sync_mode is SyncMode.SYNC
 
+            display_line = annotator._display_line_for_full
             assert annotator.active_link == app.annotation_links[0]
             assert (
                 annotator.cursor_location[0]
-                == app.annotation_links[0].sidecar_note_line
+                == display_line(
+                    app.annotation_links[0].sidecar_note_line
+                )
             )
             first_link = app.annotation_links[0]
             second_link = app.annotation_links[1]
@@ -788,11 +801,15 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             second_source_style = viewer.get_line(3).spans[0].style
             assert first_source_style == active_source_style
             assert second_source_style == normal_source_style
-            metadata_line = annotator.get_line(first_link.sidecar_start_line)
+            metadata_line = annotator.get_line(
+                display_line(first_link.sidecar_start_line)
+            )
             assert [
                 (span.start, span.end) for span in metadata_line.spans
             ] == [(0, len(metadata_line.plain))]
-            annotation_heading_line = first_link.sidecar_start_line + 1
+            annotation_heading_line = display_line(
+                first_link.sidecar_start_line + 1
+            )
             assert (
                 annotator.get_line(annotation_heading_line).plain
                 == "## Annotation 1"
@@ -801,14 +818,21 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert annotator.get_line(0).spans
             assert first_link.sidecar_quote_start_line is not None
             quote_line = annotator.get_line(
-                first_link.sidecar_quote_start_line
+                display_line(first_link.sidecar_quote_start_line)
             )
             assert [
                 (span.start, span.end) for span in quote_line.spans
             ] == [(0, len("> zero"))]
-            assert annotator.get_line(first_link.sidecar_note_line).spans == []
+            assert (
+                annotator.get_line(
+                    display_line(first_link.sidecar_note_line)
+                ).spans
+                == []
+            )
             assert first_link.sidecar_note_start_line is not None
-            note_line = annotator.get_line(first_link.sidecar_note_start_line)
+            note_line = annotator.get_line(
+                display_line(first_link.sidecar_note_start_line)
+            )
             assert [
                 (span.start, span.end)
                 for span in note_line.spans
@@ -816,7 +840,9 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert metadata_line.spans[0].style != quote_line.spans[0].style
             assert quote_line.spans[0].style != note_line.spans[0].style
 
-            second_heading_line = second_link.sidecar_start_line + 1
+            second_heading_line = display_line(
+                second_link.sidecar_start_line + 1
+            )
             inactive_heading = annotator.get_line(second_heading_line)
             assert inactive_heading.plain == "## Annotation 2"
             assert inactive_heading.spans
@@ -835,7 +861,9 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert annotator.active_link == app.annotation_links[1]
             assert (
                 annotator.cursor_location[0]
-                == app.annotation_links[1].sidecar_note_line
+                == display_line(
+                    app.annotation_links[1].sidecar_note_line
+                )
             )
             assert viewer.active_annotation_range == second_link.source_range
             assert viewer.get_line(0).spans[0].style == second_source_style
@@ -937,11 +965,194 @@ def test_alignment_modes_and_manual_alignment(tmp_path: Path) -> None:
             await pilot.press(".")
             await pilot.pause()
             assert annotator.active_link == second_link
-            assert annotator.cursor_location[0] == second_link.sidecar_note_line
+            assert annotator.cursor_location[0] == (
+                annotator._display_line_for_full(
+                    second_link.sidecar_note_line
+                )
+            )
             assert viewer.active_annotation_range == second_link.source_range
 
             await pilot.press("shift+s")
             assert app.sync_mode is SyncMode.NORMAL
+
+    asyncio.run(scenario())
+
+
+def test_manual_alignment_centers_both_pane_cursors(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_lines = [f"source line {line:03d}" for line in range(100)]
+        source_text = "\n".join(source_lines)
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        for index, line_number in enumerate((5, 20, 40, 60, 75, 90), start=1):
+            quote = source_lines[line_number]
+            start = source_text.index(quote)
+            store.append(
+                create_record(
+                    AnnotationDraft(start, start + len(quote), quote),
+                    f"Note {index}",
+                    annotation_id=f"note-{index}",
+                    created_at=f"2026-11-02T10:0{index}:00Z",
+                    source_text=source_text,
+                )
+            )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        def centered_scroll(pane: TextArea) -> int:
+            cursor_y = pane.wrapped_document.location_to_offset(
+                pane.cursor_location
+            ).y
+            viewport_height = max(1, pane.scrollable_content_region.height)
+            target = cursor_y - (viewport_height - 1) // 2
+            return round(max(0, min(target, pane.max_scroll_y)))
+
+        async with app.run_test(size=(120, 24)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            app.sync_mode = SyncMode.OFF
+
+            viewer.move_cursor((90, 0))
+            await pilot.press(".")
+            await pilot.pause()
+
+            assert annotator.active_link == app.annotation_links[-1]
+            assert round(viewer.scroll_y) == centered_scroll(viewer)
+            assert round(annotator.scroll_y) == centered_scroll(annotator)
+
+            viewer.move_cursor((0, 0))
+            viewer.scroll_to(y=0, animate=False, immediate=True)
+            annotator.focus()
+            last_note_line = annotator._display_line_for_full(
+                app.annotation_links[-1].sidecar_note_line
+            )
+            annotator.move_cursor((last_note_line, 0))
+            await pilot.press(".")
+            await pilot.pause()
+
+            assert viewer.cursor_location == (90, 0)
+            assert round(viewer.scroll_y) == centered_scroll(viewer)
+            assert round(annotator.scroll_y) == centered_scroll(annotator)
+
+    asyncio.run(scenario())
+
+
+def test_annotation_metadata_vim_folds_preserve_canonical_text(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_text = "alpha beta gamma"
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(6, 10, "beta"),
+                "Fold test note",
+                annotation_id="fold-note",
+                created_at="2026-11-02T10:00:00Z",
+                source_text=source_text,
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 28)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            canonical = store.read_text()
+            await pilot.press("tab")
+
+            assert annotator.folding_enabled is True
+            assert annotator.canonical_text == canonical
+            assert annotator.text != canonical
+            assert annotator.text.count("· zo opens") == 2
+            assert len(annotator.metadata_folds) == 2
+
+            await pilot.press("z", "i")
+            await pilot.pause()
+            assert annotator.folding_enabled is False
+            assert annotator.text == canonical
+
+            await pilot.press("z", "i")
+            await pilot.pause()
+            assert annotator.folding_enabled is True
+            assert annotator.canonical_text == canonical
+            assert annotator.text != canonical
+            assert annotator.text.count("· zo opens") == 2
+            assert app._dirty_panes() == ()
+
+            await pilot.press("g", "z", "o")
+            await pilot.pause()
+            assert "document" not in annotator._closed_fold_keys
+            assert annotator.text.count("· zo opens") == 1
+
+            await pilot.press("z", "c")
+            await pilot.pause()
+            assert "document" in annotator._closed_fold_keys
+            assert annotator.text.count("· zo opens") == 2
+
+            annotation_fold = next(
+                fold
+                for fold in annotator.metadata_folds
+                if fold.key == "annotation:1"
+            )
+            annotator.move_cursor(
+                (
+                    annotator._display_line_for_full(
+                        annotation_fold.start_line
+                    ),
+                    0,
+                )
+            )
+            await pilot.press("z", "o")
+            assert "annotation:1" not in annotator._closed_fold_keys
+            await pilot.press("z", "c")
+            assert "annotation:1" in annotator._closed_fold_keys
+
+            await pilot.press("z", "i")
+            assert annotator.folding_enabled is False
+            assert annotator.text == canonical
+            await pilot.press("z", "i")
+            assert annotator.text != canonical
+
+            await pilot.press("i")
+            await pilot.pause()
+            assert annotator.edit_mode is True
+            assert annotator.text == canonical
+            await pilot.press("escape")
+            await pilot.pause()
+            assert annotator.edit_mode is False
+            assert annotator.text != canonical
+            assert annotator.canonical_text == canonical
+            assert app._dirty_panes() == ()
+
+            await pilot.press("i")
+            annotator.move_cursor(annotator.document.end)
+            await pilot.press("x", "escape")
+            await pilot.pause()
+            assert annotator.text != annotator.canonical_text
+            assert annotator.canonical_text == canonical + "x"
+
+            await pilot.press("u")
+            await pilot.pause()
+            assert annotator.canonical_text == canonical
+            assert annotator.text != canonical
+            await pilot.press("ctrl+r", "ctrl+s")
+            await pilot.pause()
+            assert annotator.canonical_text == canonical + "x"
+            assert store.path.read_text(encoding="utf-8") == canonical + "x"
+            assert app._dirty_panes() == ()
+
+            await pilot.press("u", "ctrl+s")
+            await pilot.pause()
+            assert annotator.canonical_text == canonical
+            assert store.path.read_text(encoding="utf-8") == canonical
+            assert app._dirty_panes() == ()
 
     asyncio.run(scenario())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import difflib
 from enum import Enum
@@ -616,6 +617,16 @@ class VimTextArea(TextArea):
         self._request_copy(clear_after=False)
 
 
+@dataclass(frozen=True)
+class MetadataFold:
+    """One collapsible metadata region in canonical sidecar line numbers."""
+
+    key: str
+    start_line: int
+    end_line: int
+    label: str
+
+
 class AnnotationTextArea(TextArea):
     """Guarded sidecar editor whose cursor tracks annotation entries."""
 
@@ -680,7 +691,7 @@ class AnnotationTextArea(TextArea):
             text,
             read_only=True,
             show_cursor=True,
-            show_line_numbers=False,
+            show_line_numbers=True,
             soft_wrap=True,
             highlight_cursor_line=False,
             id=id,
@@ -692,6 +703,14 @@ class AnnotationTextArea(TextArea):
         self._quote_lines: frozenset[int] = frozenset()
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self._normal_history_pending = False
+        self._canonical_text = text
+        self.folding_enabled = True
+        self._closed_fold_keys: set[str] = set()
+        self._fold_regions: tuple[MetadataFold, ...] = ()
+        line_count = len(text.split("\n"))
+        self._display_to_full_lines = tuple(range(line_count))
+        self._full_to_display_lines = tuple(range(line_count))
+        self._display_is_projection = False
         self.set_annotation_links(annotation_links)
 
     def check_action(
@@ -729,59 +748,289 @@ class AnnotationTextArea(TextArea):
 
         return self._active_link
 
-    def set_annotation_links(
-        self, annotation_links: Iterable[AnnotationLink]
-    ) -> None:
-        """Replace the semantic sidecar ranges used for line styling."""
+    @property
+    def canonical_text(self) -> str:
+        """Return the complete sidecar, independent of its folded projection."""
 
-        links = tuple(annotation_links)
-        links_by_line: dict[int, AnnotationLink] = {}
-        metadata_lines: set[int] = set()
-        quote_lines: set[int] = set()
+        return self._canonical_text if self._display_is_projection else self.text
 
-        lines = self.text.splitlines()
+    @property
+    def metadata_folds(self) -> tuple[MetadataFold, ...]:
+        """The foldable metadata regions in canonical line coordinates."""
+
+        return self._fold_regions
+
+    def full_line_for_display(self, display_line: int) -> int:
+        """Map a visible row back to its canonical sidecar row."""
+
+        if not self._display_to_full_lines:
+            return 0
+        clamped = max(0, min(display_line, len(self._display_to_full_lines) - 1))
+        return self._display_to_full_lines[clamped]
+
+    def _display_line_for_full(self, full_line: int) -> int:
+        if not self._full_to_display_lines:
+            return 0
+        clamped = max(0, min(full_line, len(self._full_to_display_lines) - 1))
+        return self._full_to_display_lines[clamped]
+
+    def _full_cursor_location(self) -> tuple[int, int]:
+        row, column = self.cursor_location
+        return self.full_line_for_display(row), column
+
+    def _set_display_document(self, text: str) -> None:
+        """Replace only the rendered document without touching edit history."""
+
+        self._set_document(text, self.language)
+        self._search_spans = {}
+        self._line_cache.clear()
+
+    def _build_fold_regions(self) -> None:
+        lines = self._canonical_text.split("\n")
+        old_keys = {region.key for region in self._fold_regions}
+        regions: list[MetadataFold] = []
+
         if lines and lines[0].strip() == "---":
             for line_number in range(1, len(lines)):
                 if lines[line_number].strip() == "---":
-                    metadata_lines.update(range(line_number + 1))
+                    if line_number > 0:
+                        regions.append(
+                            MetadataFold(
+                                "document",
+                                0,
+                                line_number,
+                                "document metadata",
+                            )
+                        )
                     break
 
-        for link in links:
-            links_by_line.update(
+        for ordinal, link in enumerate(self._annotation_links, start=1):
+            upper = min(link.sidecar_metadata_end_line, len(lines) - 1)
+            yaml_start = next(
+                (
+                    line_number
+                    for line_number in range(
+                        max(0, link.sidecar_start_line), upper + 1
+                    )
+                    if lines[line_number].strip() == "```yaml"
+                ),
+                None,
+            )
+            if yaml_start is not None and yaml_start < upper:
+                regions.append(
+                    MetadataFold(
+                        f"annotation:{ordinal}",
+                        yaml_start,
+                        upper,
+                        f"Annotation {ordinal} metadata",
+                    )
+                )
+
+        self._fold_regions = tuple(regions)
+        new_keys = {region.key for region in regions}
+        self._closed_fold_keys.intersection_update(new_keys)
+        if self.folding_enabled:
+            self._closed_fold_keys.update(new_keys - old_keys)
+
+    def _rebuild_semantic_line_maps(self) -> None:
+        links_by_line: dict[int, AnnotationLink] = {}
+        metadata_lines: set[int] = set()
+        quote_lines: set[int] = set()
+        canonical_lines = self._canonical_text.split("\n")
+
+        full_links_by_line: dict[int, AnnotationLink] = {}
+        full_metadata_lines: set[int] = set()
+        full_quote_lines: set[int] = set()
+
+        if canonical_lines and canonical_lines[0].strip() == "---":
+            for line_number in range(1, len(canonical_lines)):
+                if canonical_lines[line_number].strip() == "---":
+                    full_metadata_lines.update(range(line_number + 1))
+                    break
+
+        for link in self._annotation_links:
+            full_links_by_line.update(
                 (line_number, link)
                 for line_number in range(
                     link.sidecar_start_line,
                     link.sidecar_end_line + 1,
                 )
             )
-            metadata_lines.update(
+            full_metadata_lines.update(
                 line_number
                 for line_number in range(
                     link.sidecar_start_line,
                     link.sidecar_metadata_end_line + 1,
                 )
-                if not lines[line_number].startswith("## Annotation ")
+                if 0 <= line_number < len(canonical_lines)
+                and not canonical_lines[line_number].startswith(
+                    "## Annotation "
+                )
             )
-            metadata_lines.add(link.sidecar_end_line)
+            full_metadata_lines.add(link.sidecar_end_line)
             if (
                 link.sidecar_quote_start_line is not None
                 and link.sidecar_quote_end_line is not None
             ):
-                quote_lines.update(
+                full_quote_lines.update(
                     range(
                         link.sidecar_quote_start_line,
                         link.sidecar_quote_end_line + 1,
                     )
                 )
 
-        self._annotation_links = links
+        for display_line, full_line in enumerate(self._display_to_full_lines):
+            link = full_links_by_line.get(full_line)
+            if link is not None:
+                links_by_line[display_line] = link
+            if full_line in full_metadata_lines:
+                metadata_lines.add(display_line)
+            if full_line in full_quote_lines:
+                quote_lines.add(display_line)
+
         self._annotation_links_by_line = links_by_line
         self._metadata_lines = frozenset(metadata_lines)
         self._quote_lines = frozenset(quote_lines)
-        if self._active_link not in links:
-            self._active_link = None
         self._line_cache.clear()
         self.refresh()
+
+    def _apply_fold_projection(
+        self, full_cursor: Optional[tuple[int, int]] = None
+    ) -> None:
+        if full_cursor is None:
+            full_cursor = self._full_cursor_location()
+
+        lines = self._canonical_text.split("\n")
+        closed_regions = {
+            region.start_line: region
+            for region in self._fold_regions
+            if self.folding_enabled
+            and not self.edit_mode
+            and region.key in self._closed_fold_keys
+        }
+        display_lines: list[str] = []
+        display_to_full: list[int] = []
+        full_to_display = [0] * len(lines)
+
+        full_line = 0
+        while full_line < len(lines):
+            region = closed_regions.get(full_line)
+            if region is None:
+                display_row = len(display_lines)
+                display_lines.append(lines[full_line])
+                display_to_full.append(full_line)
+                full_to_display[full_line] = display_row
+                full_line += 1
+                continue
+
+            display_row = len(display_lines)
+            line_count = region.end_line - region.start_line + 1
+            display_lines.append(
+                f"⏵ {region.label} · {line_count} lines · zo opens"
+            )
+            display_to_full.append(region.start_line)
+            for hidden_line in range(
+                region.start_line, min(region.end_line + 1, len(lines))
+            ):
+                full_to_display[hidden_line] = display_row
+            full_line = region.end_line + 1
+
+        projection = "\n".join(display_lines)
+        display_is_projection = projection != self._canonical_text
+        if projection != self.text:
+            self._set_display_document(projection)
+        self._display_to_full_lines = tuple(display_to_full)
+        self._full_to_display_lines = tuple(full_to_display)
+        self._display_is_projection = display_is_projection
+
+        target_row = self._display_line_for_full(full_cursor[0])
+        target_line = display_lines[target_row] if display_lines else ""
+        target_column = min(full_cursor[1], len(target_line))
+        target_location = (target_row, target_column)
+        if self.cursor_location != target_location:
+            self.move_cursor(target_location)
+        self._rebuild_semantic_line_maps()
+
+    def load_annotation_text(self, text: str) -> None:
+        """Load a new canonical sidecar and reset its edit history."""
+
+        self._canonical_text = text
+        self._fold_regions = ()
+        self._display_is_projection = False
+        line_count = len(text.split("\n"))
+        self._display_to_full_lines = tuple(range(line_count))
+        self._full_to_display_lines = tuple(range(line_count))
+        super().load_text(text)
+
+    def sync_canonical_from_editor(self) -> None:
+        """Capture the current full editor document as canonical text."""
+
+        if not self._display_is_projection:
+            self._canonical_text = self.text
+
+    def toggle_metadata_folds(self) -> str:
+        """Implement Vim's ``zi`` for the metadata fold projection."""
+
+        full_cursor = self._full_cursor_location()
+        self.folding_enabled = not self.folding_enabled
+        if self.folding_enabled and not self._closed_fold_keys:
+            self._closed_fold_keys.update(
+                region.key for region in self._fold_regions
+            )
+        self._apply_fold_projection(full_cursor)
+        return (
+            "Metadata folds enabled"
+            if self.folding_enabled
+            else "Metadata folds disabled"
+        )
+
+    def _metadata_fold_at_cursor(self) -> Optional[MetadataFold]:
+        full_line = self.full_line_for_display(self.cursor_location[0])
+        return next(
+            (
+                region
+                for region in self._fold_regions
+                if region.start_line <= full_line <= region.end_line
+            ),
+            None,
+        )
+
+    def open_metadata_fold(self) -> str:
+        """Implement Vim's ``zo`` for the metadata fold at the cursor."""
+
+        region = self._metadata_fold_at_cursor()
+        if region is None:
+            return "No metadata fold at cursor"
+        if not self.folding_enabled or region.key not in self._closed_fold_keys:
+            return "Metadata fold is already open"
+        full_cursor = self._full_cursor_location()
+        self._closed_fold_keys.remove(region.key)
+        self._apply_fold_projection(full_cursor)
+        return f"Opened {region.label}"
+
+    def close_metadata_fold(self) -> str:
+        """Implement Vim's ``zc`` for the metadata fold at the cursor."""
+
+        region = self._metadata_fold_at_cursor()
+        if region is None:
+            return "No metadata fold at cursor"
+        full_cursor = self._full_cursor_location()
+        self.folding_enabled = True
+        self._closed_fold_keys.add(region.key)
+        self._apply_fold_projection(full_cursor)
+        return f"Closed {region.label}"
+
+    def set_annotation_links(
+        self, annotation_links: Iterable[AnnotationLink]
+    ) -> None:
+        """Replace the semantic sidecar ranges used for line styling."""
+
+        full_cursor = self._full_cursor_location()
+        self._annotation_links = tuple(annotation_links)
+        if self._active_link not in self._annotation_links:
+            self._active_link = None
+        self._build_fold_regions()
+        self._apply_fold_projection(full_cursor)
 
     def show_link(self, link: AnnotationLink, *, move_cursor: bool) -> None:
         """Mark an annotation block and optionally center its first line."""
@@ -791,8 +1040,9 @@ class AnnotationTextArea(TextArea):
         if changed:
             self._line_cache.clear()
             self.refresh()
-        if move_cursor and self.cursor_location[0] != link.sidecar_note_line:
-            self.move_cursor((link.sidecar_note_line, 0), center=True)
+        target_line = self._display_line_for_full(link.sidecar_note_line)
+        if move_cursor and self.cursor_location[0] != target_line:
+            self.move_cursor((target_line, 0), center=True)
 
     def clear_active_link(self) -> None:
         """Remove the active-entry marker when no valid annotations exist."""
@@ -824,6 +1074,7 @@ class AnnotationTextArea(TextArea):
         """Return a sidecar line with metadata, quote, and note styling."""
 
         line = super().get_line(line_index)
+        full_line = self.full_line_for_display(line_index)
         line_link = self._annotation_links_by_line.get(line_index)
         if line_link is not None and line_link != self._active_link:
             line.stylize(
@@ -844,7 +1095,7 @@ class AnnotationTextArea(TextArea):
                 and link.sidecar_note_start_line is not None
                 and link.sidecar_note_end_line is not None
                 and link.sidecar_note_start_line
-                <= line_index
+                <= full_line
                 <= link.sidecar_note_end_line
             ):
                 line.stylize(
@@ -882,20 +1133,51 @@ class AnnotationTextArea(TextArea):
         self.post_message(self.EditRequested())
 
     def action_vim_undo(self) -> None:
-        previous_text = self.text
+        previous_text = self.canonical_text
+        full_cursor = self._full_cursor_location()
+        if self._display_is_projection:
+            self._set_display_document(self._canonical_text)
+            line_count = len(self._canonical_text.split("\n"))
+            self._display_to_full_lines = tuple(range(line_count))
+            self._full_to_display_lines = tuple(range(line_count))
+            self._display_is_projection = False
+            self.move_cursor(full_cursor)
         self._normal_history_pending = True
         self.undo()
         if self.text == previous_text:
             self._normal_history_pending = False
+        else:
+            self._canonical_text = self.text
+        self.set_annotation_links(parse_annotation_links(self._canonical_text))
 
     def action_vim_redo(self) -> None:
-        previous_text = self.text
+        previous_text = self.canonical_text
+        full_cursor = self._full_cursor_location()
+        if self._display_is_projection:
+            self._set_display_document(self._canonical_text)
+            line_count = len(self._canonical_text.split("\n"))
+            self._display_to_full_lines = tuple(range(line_count))
+            self._full_to_display_lines = tuple(range(line_count))
+            self._display_is_projection = False
+            self.move_cursor(full_cursor)
         self._normal_history_pending = True
         self.redo()
         if self.text == previous_text:
             self._normal_history_pending = False
+        else:
+            self._canonical_text = self.text
+        self.set_annotation_links(parse_annotation_links(self._canonical_text))
 
     def enter_edit_mode(self) -> None:
+        full_cursor = self._full_cursor_location()
+        if self._display_is_projection:
+            self._set_display_document(self._canonical_text)
+            line_count = len(self._canonical_text.split("\n"))
+            self._display_to_full_lines = tuple(range(line_count))
+            self._full_to_display_lines = tuple(range(line_count))
+            self._display_is_projection = False
+            self.move_cursor(full_cursor)
+            self._rebuild_semantic_line_maps()
         self.history.checkpoint()
         self.selection = Selection.cursor(self.cursor_location)
         self.read_only = False
@@ -905,9 +1187,13 @@ class AnnotationTextArea(TextArea):
     def leave_edit_mode(self) -> None:
         if not self.edit_mode:
             return
+        self._canonical_text = self.text
+        full_cursor = self.cursor_location
         self.read_only = True
         self.edit_mode = False
         self.history.checkpoint()
+        self._build_fold_regions()
+        self._apply_fold_projection(full_cursor)
         self.selection = Selection.cursor(self.cursor_location)
         self.post_message(self.ModeChanged())
 
@@ -2113,6 +2399,27 @@ class ViewerApp(App[None]):
             show=False,
             priority=True,
         ),
+        Binding(
+            "i",
+            "toggle_metadata_folds",
+            "Toggle metadata folds",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "o",
+            "open_metadata_fold",
+            "Open metadata fold",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "c",
+            "close_metadata_fold",
+            "Close metadata fold",
+            show=False,
+            priority=True,
+        ),
     ]
 
     def __init__(
@@ -2235,7 +2542,7 @@ class ViewerApp(App[None]):
     def _normal_help_text() -> str:
         return (
             "Tab/Ctrl-W W panes  i edit  Ctrl-S save  R rematch  "
-            "S sync mode  . align  "
+            "S sync  . align  zi/zo/zc folds  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
             "a annotate  q quit"
@@ -2256,7 +2563,7 @@ class ViewerApp(App[None]):
         if self.query_one("#viewer", VimTextArea).text != self._saved_source.text:
             dirty.append("source")
         if (
-            self.query_one("#annotator", AnnotationTextArea).text
+            self.query_one("#annotator", AnnotationTextArea).canonical_text
             != self._saved_annotation_text
         ):
             dirty.append("annotations")
@@ -2349,7 +2656,9 @@ class ViewerApp(App[None]):
         """Update annotation-pane focus without moving the source cursor."""
 
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        link = self._link_for_sidecar_line(annotator.cursor_location[0])
+        link = self._link_for_sidecar_line(
+            annotator.full_line_for_display(annotator.cursor_location[0])
+        )
         if link is None:
             annotator.clear_active_link()
             return None
@@ -2392,7 +2701,8 @@ class ViewerApp(App[None]):
             return
         if self._scroll_position_pending:
             self.query_one("#status", Static).update(
-                "Z  |  press t, z, or b to place the cursor line"
+                "Z  |  t/z/b place cursor · i toggle folds · "
+                "o/c open/close metadata"
             )
             return
 
@@ -2583,13 +2893,21 @@ class ViewerApp(App[None]):
         self.notify(f"Alignment mode: {self.sync_mode.value}", timeout=1.25)
 
     def action_align_panes(self) -> None:
-        """Manually align the other pane from the focused pane."""
+        """Manually align the panes and center both cursor lines."""
 
         target = self._focused_search_target()
         if isinstance(target, VimTextArea):
             self._align_annotation_to_source()
+            _position_cursor_line(target, "middle")
+            annotator = self.query_one("#annotator", AnnotationTextArea)
+            if annotator.active_link is not None:
+                _position_cursor_line(annotator, "middle")
         elif isinstance(target, AnnotationTextArea):
             self._align_source_to_annotation()
+            _position_cursor_line(target, "middle")
+            viewer = self.query_one("#viewer", VimTextArea)
+            if target.active_link is not None:
+                _position_cursor_line(viewer, "middle")
 
     def action_rematch_annotations(self) -> None:
         """Run a read-only scan and open review when stale records exist."""
@@ -2609,7 +2927,7 @@ class ViewerApp(App[None]):
             return
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        report = scan_rematches(viewer.text, annotator.text)
+        report = scan_rematches(viewer.text, annotator.canonical_text)
         if not report.items:
             self.notify("No structured annotations to rematch", timeout=2)
             return
@@ -2672,7 +2990,7 @@ class ViewerApp(App[None]):
         viewer.load_text(saved_source.text)
         viewer.set_annotation_ranges(self.annotation_ranges)
         viewer.move_cursor((0, 0))
-        annotator.load_text(saved_annotations)
+        annotator.load_annotation_text(saved_annotations)
         annotator.set_annotation_links(self.annotation_links)
         self._set_search_match("viewer", None)
         self._set_search_match("annotator", None)
@@ -2746,7 +3064,7 @@ class ViewerApp(App[None]):
             return
         if (
             text_sha256(viewer.text) != report.source_sha256
-            or text_sha256(annotator.text) != report.sidecar_sha256
+            or text_sha256(annotator.canonical_text) != report.sidecar_sha256
         ):
             self.notify(
                 "Documents changed after the scan; run R to recalculate",
@@ -2801,7 +3119,7 @@ class ViewerApp(App[None]):
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
         )
-        annotator.load_text(saved)
+        annotator.load_annotation_text(saved)
         annotator.set_annotation_links(self.annotation_links)
         viewer.set_annotation_ranges(self.annotation_ranges)
         self._set_search_match("annotator", None)
@@ -2844,6 +3162,9 @@ class ViewerApp(App[None]):
             "scroll_position_prefix_or_middle",
             "scroll_cursor_top",
             "scroll_cursor_bottom",
+            "toggle_metadata_folds",
+            "open_metadata_fold",
+            "close_metadata_fold",
         }:
             return False
         modal_open = isinstance(self.screen, ModalScreen)
@@ -2865,6 +3186,9 @@ class ViewerApp(App[None]):
             "scroll_position_prefix_or_middle",
             "scroll_cursor_top",
             "scroll_cursor_bottom",
+            "toggle_metadata_folds",
+            "open_metadata_fold",
+            "close_metadata_fold",
         }:
             if modal_open or search_input.has_focus:
                 return False
@@ -2873,7 +3197,13 @@ class ViewerApp(App[None]):
                 return False
         if action == "finish_pane_switch":
             return self._pane_switch_pending
-        if action in {"scroll_cursor_top", "scroll_cursor_bottom"}:
+        if action in {
+            "scroll_cursor_top",
+            "scroll_cursor_bottom",
+            "toggle_metadata_folds",
+            "open_metadata_fold",
+            "close_metadata_fold",
+        }:
             return self._scroll_position_pending
         return super().check_action(action, parameters)
 
@@ -2933,9 +3263,11 @@ class ViewerApp(App[None]):
             self._rebuild_source_line_starts()
             self._refresh_titlebar()
 
-        if annotator.text != self._saved_annotation_text:
+        if annotator.canonical_text != self._saved_annotation_text:
             try:
-                saved_annotations = self.annotation_store.write(annotator.text)
+                saved_annotations = self.annotation_store.write(
+                    annotator.canonical_text
+                )
             except AnnotationFileError as error:
                 self.notify(str(error), severity="error", timeout=5)
                 self._refresh_status()
@@ -3012,6 +3344,41 @@ class ViewerApp(App[None]):
     def action_scroll_cursor_bottom(self) -> None:
         self._finish_scroll_position("bottom")
 
+    def _finish_metadata_fold_command(self, command: str) -> None:
+        self._scroll_position_pending = False
+        if self._scroll_position_timer is not None:
+            self._scroll_position_timer.stop()
+            self._scroll_position_timer = None
+
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if not annotator.has_focus:
+            self.notify(
+                "Metadata folds are available in the annotation pane",
+                severity="warning",
+                timeout=2,
+            )
+            self._refresh_status()
+            return
+
+        if command == "toggle":
+            message = annotator.toggle_metadata_folds()
+        elif command == "open":
+            message = annotator.open_metadata_fold()
+        else:
+            message = annotator.close_metadata_fold()
+        self._set_search_match("annotator", None)
+        self._refresh_status()
+        self.notify(message, timeout=1.75)
+
+    def action_toggle_metadata_folds(self) -> None:
+        self._finish_metadata_fold_command("toggle")
+
+    def action_open_metadata_fold(self) -> None:
+        self._finish_metadata_fold_command("open")
+
+    def action_close_metadata_fold(self) -> None:
+        self._finish_metadata_fold_command("close")
+
     @on(VimTextArea.EditRequested)
     def on_edit_requested(self, event: VimTextArea.EditRequested) -> None:
         """Ask for an exact confirmation before enabling source edits."""
@@ -3086,7 +3453,8 @@ class ViewerApp(App[None]):
         if not (annotator.edit_mode or annotator._normal_history_pending):
             return
         annotator._normal_history_pending = False
-        self.annotation_text = annotator.text
+        annotator.sync_canonical_from_editor()
+        self.annotation_text = annotator.canonical_text
         self.annotation_links = parse_annotation_links(self.annotation_text)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
@@ -3222,7 +3590,7 @@ class ViewerApp(App[None]):
             link.source_range for link in self.annotation_links
         )
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        annotator.load_text(updated)
+        annotator.load_annotation_text(updated)
         annotator.set_annotation_links(self.annotation_links)
         self._set_search_match("annotator", None)
         viewer.set_annotation_ranges(self.annotation_ranges)

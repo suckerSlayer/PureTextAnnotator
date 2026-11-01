@@ -55,7 +55,9 @@ Use `--no-wrap` to keep long lines unwrapped.
 | `n` / `N` | Repeat the pane's search forward / backward |
 | `R` | Scan stale annotations and open rematch review |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
-| `.` | Manually align the other pane from the focused pane |
+| `.` | Manually align and center both panes' cursor lines |
+| `zi` in annotations | Toggle metadata folding on/off |
+| `zo` / `zc` in annotations | Open/close the metadata fold at the cursor |
 | Tab / Shift+Tab | Switch between source and annotation panes |
 | Ctrl+W, then `w` | Switch between source and annotation panes |
 | Shift+arrow keys | Extend a selection |
@@ -164,7 +166,22 @@ The status line shows the current alignment mode. Press `S` to cycle through:
 
 In every mode, press `.` to align manually from the focused pane: from the
 source it centers the corresponding annotation on `### Note`; from an annotation
-it centers the source on that annotation's recorded range.
+it centers the source on that annotation's recorded range. Manual alignment
+always scrolls both panes so their cursor lines are at their viewport midpoints
+when the document boundaries allow it.
+
+## Annotation metadata folds
+
+Metadata starts folded. The document front matter and each annotation's YAML
+metadata initially collapse to one muted summary line. With the annotation pane
+focused, press `zi` to toggle metadata folding globally. Move onto a metadata
+region and use `zc` to close it or `zo` to open it; opening and closing one fold
+preserves the state of the others.
+
+Folding changes only the annotation pane's visual projection. Editing, saving,
+undo/redo, rematching, alignment, and dirty tracking continue to use the complete
+sidecar. Entering Edit mode temporarily unfolds the full sidecar; returning to
+Normal mode restores the selected folds.
 
 ## Add an annotation
 
@@ -198,7 +215,7 @@ dimmed so the current note remains easy to identify.
 - `.txt`, `.md`, and `.markdown` files
 - UTF-8 input, including files with a UTF-8 byte-order mark
 - Guarded source editing and direct annotation editing with dirty tracking
-- Line numbers and optional wrapping
+- Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
 - Original quotation, source range, hashes, and bounded context recorded for
   new notes

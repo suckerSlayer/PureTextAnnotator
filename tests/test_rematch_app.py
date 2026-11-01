@@ -10,6 +10,7 @@ from pure_text_annotator.annotations import (
     create_record,
 )
 from pure_text_annotator.app import (
+    AnnotationTextArea,
     DemoResetModal,
     RematchConfirmModal,
     RematchReviewModal,
@@ -52,6 +53,11 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
         )
 
         async with app.run_test(size=(120, 34)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            assert annotator.folding_enabled is True
+            assert annotator.canonical_text == before
+            assert annotator.text != before
+
             await pilot.press("shift+r")
             await pilot.pause()
             assert isinstance(app.screen, RematchReviewModal)
@@ -80,6 +86,8 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
             await pilot.pause()
 
             saved = store.path.read_text(encoding="utf-8")
+            assert annotator.canonical_text == saved
+            assert annotator.text != saved
             record = parse_annotation_records(saved)[0]
             changed = source_path.read_text(encoding="utf-8")
             assert record.start == changed.index("Target sentence")
