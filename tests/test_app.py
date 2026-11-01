@@ -1393,3 +1393,46 @@ def test_vim_line_scrolling_and_cursor_placement_in_both_panes(
 
     asyncio.run(scenario())
 
+
+def test_both_panes_scroll_half_a_viewport_past_the_final_line(
+    tmp_path: Path,
+) -> None:
+    async def verify_pane(pilot, pane: TextArea) -> None:
+        pane.focus()
+        await pilot.press("G", "z", "z")
+        await pilot.pause()
+
+        viewport_height = pane.scrollable_content_region.height
+        cursor_y = pane.wrapped_document.location_to_offset(
+            pane.cursor_location
+        ).y
+        centered_scroll = cursor_y - (viewport_height - 1) // 2
+
+        assert pane.virtual_size.height == (
+            pane.wrapped_document.height + viewport_height // 2
+        )
+        assert pane.max_scroll_y >= centered_scroll
+        assert round(pane.scroll_y) == centered_scroll
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text(
+            "\n".join(f"source {line}" for line in range(100)),
+            encoding="utf-8",
+        )
+        source_path.with_name(
+            source_path.name + ".annotations.md"
+        ).write_text(
+            "\n".join(f"annotation {line}" for line in range(100)),
+            encoding="utf-8",
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            await verify_pane(pilot, app.query_one(VimTextArea))
+            await verify_pane(pilot, app.query_one(AnnotationTextArea))
+
+    asyncio.run(scenario())
+

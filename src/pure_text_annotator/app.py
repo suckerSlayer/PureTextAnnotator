@@ -5,7 +5,6 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import difflib
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
@@ -13,8 +12,8 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.geometry import Offset
+from textual.containers import Grid, Horizontal, Vertical
+from textual.geometry import Offset, Size
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -37,6 +36,7 @@ from .clipboard import ClipboardCopyError, copy_to_system_clipboard
 from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
 from .files import LoadedTextFile, TextFileError, load_text_file, save_text_file
 from .rematch import (
+    RematchCandidate,
     RematchChoice,
     RematchItem,
     RematchReport,
@@ -52,6 +52,9 @@ from .rematch import (
 
 ClipboardWriter = Callable[[str], Optional[str]]
 SourceWriter = Callable[[LoadedTextFile, str], LoadedTextFile]
+RematchPreviewCallback = Callable[
+    [RematchItem, Optional[RematchCandidate]], None
+]
 
 
 class SyncMode(str, Enum):
@@ -203,12 +206,30 @@ def _position_cursor_line(text_area: TextArea, placement: str) -> None:
     )
 
 
-class VimTextArea(TextArea):
+class HalfPageBottomScrollTextArea(TextArea):
+    """A text area with enough trailing space to center its final line."""
+
+    def _refresh_size(self) -> None:
+        if self.soft_wrap:
+            base_size = Size(0, self.wrapped_document.height)
+        else:
+            width, height = self.document.get_size(self.indent_width)
+            base_size = Size(width + self.gutter_width + 1, height)
+        trailing_height = self.scrollable_content_region.height // 2
+        self.virtual_size = Size(
+            base_size.width,
+            base_size.height + trailing_height,
+        )
+        self._refresh_scrollbars()
+
+
+class VimTextArea(HalfPageBottomScrollTextArea):
     """A guarded editable TextArea with a small, predictable Vim key set."""
 
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
         "text-area--annotation",
         "text-area--active-annotation",
+        "text-area--rematch-candidate",
         "text-area--search-match",
     }
 
@@ -306,6 +327,10 @@ class VimTextArea(TextArea):
         self._active_annotation_spans: dict[
             int, tuple[tuple[int, int], ...]
         ] = {}
+        self._rematch_candidate_range: Optional[AnnotationRange] = None
+        self._rematch_candidate_spans: dict[
+            int, tuple[tuple[int, int], ...]
+        ] = {}
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self._normal_history_pending = False
         self.set_annotation_ranges(annotation_ranges)
@@ -321,6 +346,12 @@ class VimTextArea(TextArea):
         """The source range synchronized with the focused sidecar entry."""
 
         return self._active_annotation_range
+
+    @property
+    def rematch_candidate_range(self) -> Optional[AnnotationRange]:
+        """The proposal currently previewed by the rematch review."""
+
+        return self._rematch_candidate_range
 
     def set_annotation_ranges(
         self, annotation_ranges: Iterable[AnnotationRange]
@@ -392,6 +423,27 @@ class VimTextArea(TextArea):
         self._line_cache.clear()
         self.refresh()
 
+    def set_rematch_candidate_range(
+        self, candidate_range: Optional[AnnotationRange]
+    ) -> None:
+        """Highlight a proposed range independently of saved annotations."""
+
+        valid_range = (
+            candidate_range
+            if candidate_range is not None
+            and 0 <= candidate_range.start < candidate_range.end <= len(self.text)
+            else None
+        )
+        if valid_range == self._rematch_candidate_range:
+            return
+        self._rematch_candidate_range = valid_range
+        self._rematch_candidate_spans = self._build_annotation_spans(
+            self.text,
+            () if valid_range is None else (valid_range,),
+        )
+        self._line_cache.clear()
+        self.refresh()
+
     @staticmethod
     def _build_annotation_spans(
         text: str, annotation_ranges: Iterable[AnnotationRange]
@@ -442,6 +494,11 @@ class VimTextArea(TextArea):
         )
         for start, end in self._active_annotation_spans.get(line_index, ()):
             line.stylize(active_style, start, end)
+        rematch_style = self.get_component_rich_style(
+            "text-area--rematch-candidate"
+        )
+        for start, end in self._rematch_candidate_spans.get(line_index, ()):
+            line.stylize(rematch_style, start, end)
         search_style = self.get_component_rich_style("text-area--search-match")
         for start, end in self._search_spans.get(line_index, ()):
             line.stylize(search_style, start, end)
@@ -627,7 +684,7 @@ class MetadataFold:
     label: str
 
 
-class AnnotationTextArea(TextArea):
+class AnnotationTextArea(HalfPageBottomScrollTextArea):
     """Guarded sidecar editor whose cursor tracks annotation entries."""
 
     COMPONENT_CLASSES = TextArea.COMPONENT_CLASSES | {
@@ -1215,6 +1272,21 @@ class SearchInput(Input):
         self.post_message(self.Cancelled())
 
 
+@dataclass(frozen=True)
+class RematchPreviewState:
+    """Pane state restored after the temporary rematch preview closes."""
+
+    viewer_cursor: tuple[int, int]
+    viewer_selection: Selection
+    viewer_visual_mode: bool
+    viewer_scroll: tuple[float, float]
+    annotator_cursor: tuple[int, int]
+    annotator_selection: Selection
+    annotator_scroll: tuple[float, float]
+    annotator_active_link: Optional[AnnotationLink]
+    focused_pane: str
+
+
 class NoteModal(ModalScreen[Optional[str]]):
     """Collect a Markdown note for one selected source range."""
 
@@ -1681,55 +1753,49 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
 
     CSS = """
     RematchReviewModal {
-        align: center middle;
+        align: center bottom;
+        background: $background 10%;
     }
 
     #rematch-review-dialog {
-        width: 92%;
-        max-width: 116;
-        height: 92%;
-        padding: 1 2;
+        width: 96%;
+        max-width: 120;
+        height: 10;
+        margin-bottom: 1;
+        padding: 0 1;
         border: round $accent;
         background: $panel;
     }
 
     #rematch-review-title {
         height: 1;
-        margin-bottom: 1;
         text-style: bold;
         color: $accent;
     }
 
-    #rematch-review-summary,
-    #rematch-review-hint {
-        height: auto;
-        margin-bottom: 1;
-        color: $text-muted;
-    }
-
-    #rematch-review-list {
-        height: 10;
-        margin-bottom: 1;
-        padding: 0 1;
-        border: solid $primary;
-        overflow-y: auto;
-    }
-
     #rematch-review-detail {
         height: 1fr;
-        margin-bottom: 1;
         padding: 0 1;
-        border: solid $secondary;
-        overflow-y: auto;
+        background: $surface;
+    }
+
+    #rematch-review-hint {
+        height: 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
     }
 
     #rematch-review-buttons {
         height: 3;
-        align-horizontal: right;
+        grid-size: 6 1;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-rows: 3;
+        grid-gutter: 0 1;
     }
 
     #rematch-review-buttons Button {
-        margin-left: 1;
+        width: 1fr;
+        min-width: 0;
     }
     """
 
@@ -1738,6 +1804,13 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
         Binding("k,up", "previous_item", "Previous", priority=True, show=False),
         Binding("space", "toggle_choice", "Accept/skip", priority=True, show=False),
         Binding("c", "cycle_candidate", "Next candidate", priority=True, show=False),
+        Binding(
+            "shift+c",
+            "previous_candidate",
+            "Previous candidate",
+            priority=True,
+            show=False,
+        ),
         Binding("m", "use_manual_selection", "Use source selection", priority=True, show=False),
         Binding("ctrl+s", "continue_to_confirmation", "Apply selected", priority=True, show=False),
         Binding("escape", "cancel", "Cancel", priority=True, show=False),
@@ -1749,11 +1822,13 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
         source_text: str,
         manual_source_range: Optional[AnnotationRange] = None,
         initial_choices: Iterable[RematchChoice] = (),
+        preview_callback: Optional[RematchPreviewCallback] = None,
     ) -> None:
         super().__init__()
         self.report = report
         self.source_text = source_text
         self.manual_source_range = manual_source_range
+        self.preview_callback = preview_callback
         self.items = report.stale_items
         self.current_index = 0
         initial_by_id = {
@@ -1806,25 +1881,21 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
                 markup=False,
                 id="rematch-review-title",
             )
-            yield Static("", markup=False, id="rematch-review-summary")
-            yield Static("", markup=False, id="rematch-review-list")
             yield Static("", markup=False, id="rematch-review-detail")
             yield Static(
-                "J/K navigate · Space accepts/skips · C cycles alternatives · "
-                "M uses the Visual selection made in the source pane · "
-                "Ctrl+S continues to the confirmation prompt",
+                "J/K item · Space decision · C candidates · M selection · "
+                "Ctrl+S confirm",
                 markup=False,
                 id="rematch-review-hint",
             )
-            with Horizontal(id="rematch-review-buttons"):
+            with Grid(id="rematch-review-buttons"):
                 yield Button("Cancel", id="cancel-rematch-review")
-                yield Button("Previous", id="previous-rematch-item")
-                yield Button("Next", id="next-rematch-item")
-                yield Button("Accept / Skip", id="toggle-rematch-choice")
-                yield Button("Next candidate", id="cycle-rematch-candidate")
-                yield Button("Use selection", id="manual-rematch-candidate")
+                yield Button("← Item", id="previous-rematch-item")
+                yield Button("Item →", id="next-rematch-item")
+                yield Button("Accept", id="toggle-rematch-choice")
+                yield Button("Cand. →", id="cycle-rematch-candidate")
                 yield Button(
-                    "Apply selected…",
+                    "Confirm…",
                     variant="primary",
                     id="continue-rematch",
                 )
@@ -1833,10 +1904,13 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
         self._refresh_review()
         self.query_one("#cancel-rematch-review", Button).focus()
 
-    @staticmethod
-    def _shorten(text: str, limit: int = 100) -> str:
-        flattened = text.replace("\n", " ↵ ")
-        return flattened if len(flattened) <= limit else flattened[: limit - 1] + "…"
+    def _source_position(self, offset: int) -> str:
+        """Return a human-readable one-based source position."""
+
+        offset = max(0, min(offset, len(self.source_text)))
+        line = self.source_text.count("\n", 0, offset) + 1
+        line_start = self.source_text.rfind("\n", 0, offset) + 1
+        return f"line {line}, column {offset - line_start + 1}"
 
     def _current_item(self) -> Optional[RematchItem]:
         if not self.items:
@@ -1862,28 +1936,9 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
             )
             if self.report.count(status)
         )
-        self.query_one("#rematch-review-summary", Static).update(
-            f"Read-only scan · {len(self.selected_ids)} selected · {counts}"
-        )
-
-        overview = []
-        for index, item in enumerate(self.items):
-            annotation_id = item.annotation.annotation_id
-            pointer = ">" if index == self.current_index else " "
-            selected = "x" if annotation_id in self.selected_ids else " "
-            candidate = self._current_candidate(item)
-            proposal = (
-                f"[{candidate.source_range.start}, {candidate.source_range.end}) "
-                f"~{candidate.confidence}%"
-                if candidate is not None
-                else "no safe candidate"
-            )
-            overview.append(
-                f"{pointer} [{selected}] Annotation {item.annotation.ordinal} "
-                f"{item.status.value}: {proposal}"
-            )
-        self.query_one("#rematch-review-list", Static).update(
-            "\n".join(overview) or "No stale annotations."
+        self.query_one("#rematch-review-title", Static).update(
+            f"Rematch review · item {self.current_index + 1}/"
+            f"{len(self.items)} · {len(self.selected_ids)} selected · {counts}"
         )
 
         item = self._current_item()
@@ -1894,56 +1949,51 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
             return
         record = item.annotation
         candidate = self._current_candidate(item)
+        candidates = self.candidates_by_id[record.annotation_id]
+        candidate_index = self.candidate_indices[record.annotation_id]
         old_range = (
             f"[{record.start}, {record.end})"
             if record.start is not None and record.end is not None
             else "unavailable"
         )
-        lines = [
-            f"Annotation {record.ordinal} · {record.annotation_id}",
-            f"Status: {item.status.value}",
-            f"Old range: {old_range}",
-            f"Reason: {item.explanation}",
-            "",
-            "Stored quotation:",
-            self._shorten(record.quote or "(unavailable)", 500),
-        ]
+        decision = (
+            "ACCEPTED"
+            if record.annotation_id in self.selected_ids
+            else "SKIPPED"
+        )
+        toggle_button = self.query_one("#toggle-rematch-choice", Button)
+        toggle_button.label = "Skip" if decision == "ACCEPTED" else "Accept"
+        toggle_button.disabled = not candidates
+        self.query_one(
+            "#cycle-rematch-candidate", Button
+        ).disabled = len(candidates) < 2
         if candidate is not None:
-            lines.extend(
-                [
-                    "",
-                    f"Candidate {self.candidate_indices[record.annotation_id] + 1} "
-                    f"of {len(self.candidates_by_id[record.annotation_id])}",
-                    f"Proposed range: [{candidate.source_range.start}, "
-                    f"{candidate.source_range.end})",
-                    f"Estimated correctness: ~{candidate.confidence}%",
-                    f"Method: {candidate.method}",
-                    "Evidence: " + "; ".join(candidate.evidence),
-                    "",
-                    "Proposed current source text:",
-                    self._shorten(candidate.text, 500),
-                ]
-            )
-            if record.quote != candidate.text:
-                diff = list(
-                    difflib.unified_diff(
-                        (record.quote or "").splitlines(),
-                        candidate.text.splitlines(),
-                        fromfile="stored quote",
-                        tofile="proposed source",
-                        lineterm="",
-                    )
+            detail = "\n".join(
+                (
+                    f"#{record.ordinal} · {item.status.value} · "
+                    f"{decision} · candidate {candidate_index + 1}/"
+                    f"{len(candidates)} · ~{candidate.confidence}% · "
+                    f"{candidate.method}",
+                    f"Old {old_range} → proposed "
+                    f"[{candidate.source_range.start}, "
+                    f"{candidate.source_range.end}) · "
+                    f"{self._source_position(candidate.source_range.start)} "
+                    f"· evidence: "
+                    + ("; ".join(candidate.evidence) or "(none)"),
                 )
-                lines.extend(["", "Diff:", *diff[:20]])
-        else:
-            lines.extend(
-                [
-                    "",
-                    "No automatic candidate is offered. This annotation will "
-                    "remain unchanged.",
-                ]
             )
-        self.query_one("#rematch-review-detail", Static).update("\n".join(lines))
+        else:
+            detail = "\n".join(
+                (
+                    f"#{record.ordinal} · {item.status.value} · {decision} · "
+                    "no safe automatic candidate",
+                    f"Old {old_range} · {item.explanation} · use M with a "
+                    "source Visual selection",
+                )
+            )
+        self.query_one("#rematch-review-detail", Static).update(detail)
+        if self.preview_callback is not None:
+            self.preview_callback(item, candidate)
 
     def action_next_item(self) -> None:
         if self.items:
@@ -1975,6 +2025,12 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
         self._refresh_review()
 
     def action_cycle_candidate(self) -> None:
+        self._cycle_candidate(1)
+
+    def action_previous_candidate(self) -> None:
+        self._cycle_candidate(-1)
+
+    def _cycle_candidate(self, direction: int) -> None:
         item = self._current_item()
         if item is None:
             return
@@ -1984,7 +2040,7 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
             return
         annotation_id = item.annotation.annotation_id
         self.candidate_indices[annotation_id] = (
-            self.candidate_indices[annotation_id] + 1
+            self.candidate_indices[annotation_id] + direction
         ) % len(candidates)
         self._refresh_review()
 
@@ -2059,10 +2115,6 @@ class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
     @on(Button.Pressed, "#cycle-rematch-candidate")
     def on_cycle_pressed(self, _event: Button.Pressed) -> None:
         self.action_cycle_candidate()
-
-    @on(Button.Pressed, "#manual-rematch-candidate")
-    def on_manual_pressed(self, _event: Button.Pressed) -> None:
-        self.action_use_manual_selection()
 
     @on(Button.Pressed, "#continue-rematch")
     def on_continue_pressed(self, _event: Button.Pressed) -> None:
@@ -2284,6 +2336,12 @@ class ViewerApp(App[None]):
         text-style: underline;
     }
 
+    #viewer .text-area--rematch-candidate {
+        color: $text;
+        background: $success 50%;
+        text-style: bold underline;
+    }
+
     #annotator .text-area--annotation-meta {
         color: $text-muted;
         text-style: dim;
@@ -2448,6 +2506,8 @@ class ViewerApp(App[None]):
         self._pending_rematch_report: Optional[RematchReport] = None
         self._pending_rematch_choices: tuple[RematchChoice, ...] = ()
         self._pending_manual_range: Optional[AnnotationRange] = None
+        self._rematch_preview_state: Optional[RematchPreviewState] = None
+        self._suspend_alignment = False
         self.demo_case: Optional[DemoCase] = None
         self._demo_case_error: Optional[str] = None
         self._demo_reset_complete = False
@@ -2909,6 +2969,126 @@ class ViewerApp(App[None]):
             if target.active_link is not None:
                 _position_cursor_line(viewer, "middle")
 
+    def _capture_rematch_preview_state(self) -> None:
+        """Remember both panes before the review starts moving them."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        self._rematch_preview_state = RematchPreviewState(
+            viewer_cursor=viewer.cursor_location,
+            viewer_selection=viewer.selection,
+            viewer_visual_mode=viewer.visual_mode,
+            viewer_scroll=(float(viewer.scroll_x), float(viewer.scroll_y)),
+            annotator_cursor=annotator.cursor_location,
+            annotator_selection=annotator.selection,
+            annotator_scroll=(
+                float(annotator.scroll_x),
+                float(annotator.scroll_y),
+            ),
+            annotator_active_link=annotator.active_link,
+            focused_pane="annotator" if annotator.has_focus else "viewer",
+        )
+
+    def _preview_rematch_candidate(
+        self,
+        item: RematchItem,
+        candidate: Optional[RematchCandidate],
+    ) -> None:
+        """Reveal the current proposal in the panes behind the compact modal."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer.visual_mode = False
+        viewer.selection = Selection.cursor(viewer.cursor_location)
+
+        preview_range = (
+            candidate.source_range if candidate is not None else None
+        )
+        viewer.set_rematch_candidate_range(preview_range)
+        preview_offset: Optional[int] = None
+        if preview_range is not None:
+            preview_offset = preview_range.start
+        else:
+            record = item.annotation
+            if (
+                record.start is not None
+                and 0 <= record.start < len(viewer.text)
+            ):
+                preview_offset = record.start
+        if preview_offset is not None:
+            viewer.move_cursor(
+                self._source_location_for_offset(preview_offset)
+            )
+            _position_cursor_line(viewer, "top")
+
+        record_line = annotator.canonical_text.count(
+            "\n", 0, item.annotation.block_start
+        )
+        link = next(
+            (
+                annotation_link
+                for annotation_link in self.annotation_links
+                if annotation_link.sidecar_start_line == record_line
+            ),
+            None,
+        )
+        if link is None:
+            annotator.clear_active_link()
+            preview_line = record_line
+        else:
+            annotator.show_link(link, move_cursor=False)
+            preview_line = (
+                link.sidecar_quote_start_line
+                if link.sidecar_quote_start_line is not None
+                else link.sidecar_note_line
+            )
+        annotator.move_cursor(
+            (annotator._display_line_for_full(preview_line), 0)
+        )
+        _position_cursor_line(annotator, "top")
+
+    def _restore_rematch_preview(self) -> None:
+        """Remove the proposal marker and restore the pre-review pane state."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        self._suspend_alignment = True
+        viewer.set_rematch_candidate_range(None)
+        state = self._rematch_preview_state
+        if state is not None:
+            viewer.move_cursor(state.viewer_cursor)
+            viewer.selection = state.viewer_selection
+            viewer.visual_mode = state.viewer_visual_mode
+            viewer.scroll_to(
+                x=state.viewer_scroll[0],
+                y=state.viewer_scroll[1],
+                animate=False,
+                immediate=True,
+            )
+            if state.annotator_active_link is None:
+                annotator.clear_active_link()
+            else:
+                annotator.show_link(
+                    state.annotator_active_link,
+                    move_cursor=False,
+                )
+            annotator.move_cursor(state.annotator_cursor)
+            annotator.selection = state.annotator_selection
+            annotator.scroll_to(
+                x=state.annotator_scroll[0],
+                y=state.annotator_scroll[1],
+                animate=False,
+                immediate=True,
+            )
+            if state.focused_pane == "annotator":
+                annotator.focus()
+            else:
+                viewer.focus()
+        self.call_after_refresh(self._resume_alignment)
+
+    def _resume_alignment(self) -> None:
+        self._suspend_alignment = False
+
     def action_rematch_annotations(self) -> None:
         """Run a read-only scan and open review when stale records exist."""
 
@@ -2950,11 +3130,13 @@ class ViewerApp(App[None]):
             self._pending_manual_range = AnnotationRange(start, end)
         else:
             self._pending_manual_range = None
+        self._capture_rematch_preview_state()
         self.push_screen(
             RematchReviewModal(
                 report,
                 viewer.text,
                 self._pending_manual_range,
+                preview_callback=self._preview_rematch_candidate,
             ),
             callback=self._finish_rematch_review,
         )
@@ -3007,10 +3189,12 @@ class ViewerApp(App[None]):
     def _finish_rematch_review(
         self, choices: Optional[tuple[RematchChoice, ...]]
     ) -> None:
+        self._restore_rematch_preview()
         if choices is None:
             self._pending_rematch_report = None
             self._pending_rematch_choices = ()
             self._pending_manual_range = None
+            self._rematch_preview_state = None
             self._refresh_status()
             return
         report = self._pending_rematch_report
@@ -3034,6 +3218,7 @@ class ViewerApp(App[None]):
                     self.query_one("#viewer", VimTextArea).text,
                     self._pending_manual_range,
                     choices,
+                    preview_callback=self._preview_rematch_candidate,
                 ),
                 callback=self._finish_rematch_review,
             )
@@ -3042,8 +3227,10 @@ class ViewerApp(App[None]):
             self._pending_rematch_report = None
             self._pending_rematch_choices = ()
             self._pending_manual_range = None
+            self._rematch_preview_state = None
             self._refresh_status()
             return
+        self._rematch_preview_state = None
         self._apply_confirmed_rematch(report, choices)
 
     def _apply_confirmed_rematch(
@@ -3472,7 +3659,8 @@ class ViewerApp(App[None]):
         self._refresh_status()
         viewer = self.query_one("#viewer", VimTextArea)
         if (
-            viewer.has_focus
+            not self._suspend_alignment
+            and viewer.has_focus
             and not viewer.edit_mode
             and self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}
         ):
@@ -3485,7 +3673,11 @@ class ViewerApp(App[None]):
         self._clear_stale_search_match("annotator")
         self._refresh_status()
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        if annotator.has_focus and not annotator.edit_mode:
+        if (
+            not self._suspend_alignment
+            and annotator.has_focus
+            and not annotator.edit_mode
+        ):
             if self.sync_mode is SyncMode.SYNC:
                 self._align_source_to_annotation()
             else:

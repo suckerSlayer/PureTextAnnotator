@@ -70,6 +70,11 @@ The `w`, `b`, and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
 word, while adjacent non-blank symbols form another. Whitespace is skipped.
 
+Both panes provide trailing scroll space equal to half their visible height.
+This lets the final document line move to the middle of its pane with `zz` or
+manual alignment; the blank space is visual only and is never saved to either
+file.
+
 ## Edit text
 
 With the source pane focused, press `i` to request Edit mode. Because this mode
@@ -119,11 +124,18 @@ or Malformed, then searches exact text, conservatively normalized text, saved
 prefix/suffix context, deterministic fuzzy candidates, and neighboring
 annotation order. No network or AI service is used.
 
-The review shows old and proposed ranges, quotation changes, evidence, and a
-rounded approximate correctness estimate. Use `J`/`K` to navigate, Space to
-accept or skip, and `C` to cycle alternatives. Proposals estimated at 90% or
-higher are preselected; lower-confidence and ambiguous proposals require an
-explicit choice. Orphaned and malformed annotations remain unchanged.
+The review is a compact panel at the bottom, leaving both text panes visible.
+For each proposal, the source pane scrolls to the proposed passage and marks it
+in green, while the annotation pane shows the stored quotation and note. The
+panel itself is limited to the old/proposed ranges, line and column, method,
+evidence, rounded approximate correctness estimate, and decision controls.
+
+Use `J`/`K` to navigate annotations, Space to accept or skip, and `C` /
+`Shift+C` to move forward/backward through candidates. The two panes update
+immediately, so alternatives can be checked in their real source context before
+applying anything. Proposals estimated at 90% or higher are preselected;
+lower-confidence and ambiguous proposals require an explicit choice. Orphaned
+and malformed annotations remain unchanged.
 
 For a manual match, cancel review, make a Visual selection in the source pane,
 press `R`, navigate to the intended annotation, and press `M`. The selected span

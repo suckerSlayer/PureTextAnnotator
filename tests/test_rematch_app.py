@@ -14,6 +14,7 @@ from pure_text_annotator.app import (
     DemoResetModal,
     RematchConfirmModal,
     RematchReviewModal,
+    VimTextArea,
     ViewerApp,
 )
 from pure_text_annotator.files import load_text_file
@@ -95,6 +96,124 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
             backups = list(tmp_path.glob("*.before-rematch-*"))
             assert len(backups) == 1
             assert backups[0].read_text(encoding="utf-8") == before
+
+    asyncio.run(scenario())
+
+
+def test_rematch_review_is_compact_and_previews_both_panes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path, _store, _before = prepare_shifted_case(tmp_path)
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            original_viewer_cursor = viewer.cursor_location
+            original_annotator_cursor = annotator.cursor_location
+            original_active_link = annotator.active_link
+
+            await pilot.press("shift+r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RematchReviewModal)
+            review = app.screen
+            dialog = review.query_one("#rematch-review-dialog")
+            detail = app.screen.query_one(
+                "#rematch-review-detail", Static
+            ).render().plain
+            candidate = review._current_candidate(review.items[0])
+            assert candidate is not None
+
+            assert dialog.region.height <= 10
+            assert dialog.region.y > 0
+            assert "#1 · Shifted" in detail
+            assert "candidate 1/1" in detail
+            assert "evidence:" in detail
+            assert viewer.rematch_candidate_range == candidate.source_range
+            assert annotator.active_link is not None
+            assert viewer.cursor_location == app._source_location_for_offset(
+                candidate.source_range.start
+            )
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert viewer.rematch_candidate_range is None
+            assert viewer.cursor_location == original_viewer_cursor
+            assert annotator.cursor_location == original_annotator_cursor
+            assert annotator.active_link == original_active_link
+
+    asyncio.run(scenario())
+
+
+def test_rematch_review_exposes_and_selects_alternative_candidates(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        original = "Repeated phrase."
+        source_path = tmp_path / "source.md"
+        source_path.write_text(original, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, len(original), original),
+                "Choose the occurrence with the intended context.",
+                annotation_id="ambiguous-note",
+                created_at="2026-11-02T10:00:00Z",
+                source_text=original,
+            )
+        )
+        changed = (
+            "Alpha context.\nRepeated phrase.\nMiddle context.\n"
+            "Repeated phrase.\nOmega context."
+        )
+        source_path.write_text(changed, encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(90, 26)) as pilot:
+            await pilot.press("shift+r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RematchReviewModal)
+            review = app.screen
+            item = review.items[0]
+            annotation_id = item.annotation.annotation_id
+            candidates = review.candidates_by_id[annotation_id]
+            assert len(candidates) == 2
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            detail_widget = review.query_one("#rematch-review-detail", Static)
+            first_detail = detail_widget.render().plain
+            assert "candidate 1/2" in first_detail
+            assert "line 2, column 1" in first_detail
+            assert viewer.rematch_candidate_range == candidates[0].source_range
+            active_link = annotator.active_link
+            assert active_link is not None
+
+            await pilot.press("c")
+            await pilot.pause()
+            second_detail = detail_widget.render().plain
+            assert "candidate 2/2" in second_detail
+            assert "line 4, column 1" in second_detail
+            assert first_detail != second_detail
+            assert viewer.rematch_candidate_range == candidates[1].source_range
+            assert annotator.active_link == active_link
+
+            await pilot.press("space")
+            choices = review._choices()
+            assert len(choices) == 1
+            assert choices[0].candidate.source_range == candidates[1].source_range
+
+            await pilot.press("shift+c")
+            await pilot.pause()
+            assert "candidate 1/2" in detail_widget.render().plain
+            assert viewer.rematch_candidate_range == candidates[0].source_range
 
     asyncio.run(scenario())
 

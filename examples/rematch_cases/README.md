@@ -18,10 +18,13 @@ asks whether to reset both sample files to their checked-in stale baseline.
 Cancel leaves the files untouched. Choose **Reset demo**, then press `R` again
 to open the read-only rematch review.
 
-In review, use `J`/`K` to move, Space to accept or skip, and `C` to inspect an
-alternative candidate. Only estimates of 90% or higher are preselected. Press
-Ctrl+S to continue to the final confirmation; Cancel still makes no changes.
-Applying writes only `cases.md.annotations.md` and creates a timestamped backup.
+In review, use `J`/`K` to move, Space to accept or skip, and `C` / `Shift+C` to
+inspect the next/previous candidate. The compact bottom panel leaves the source
+and annotation panes visible: the source candidate is marked in green and the
+corresponding stored quotation and note are focused beside it. Only estimates
+of 90% or higher are preselected. Press Ctrl+S to continue to the final
+confirmation; Cancel still makes no changes. Applying writes only
+`cases.md.annotations.md` and creates a timestamped backup.
 
 To try manual recovery, cancel review, make a Visual selection in the source,
 press `R`, navigate to an annotation, and press `M` to use that source span.
