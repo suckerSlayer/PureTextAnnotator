@@ -299,6 +299,43 @@ def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
     asyncio.run(scenario())
 
 
+def test_ctrl_s_saves_dirty_panes_without_quitting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            await pilot.press("i")
+            await pilot.pause()
+            confirmation = app.screen.query_one("#edit-confirmation", Input)
+            confirmation.value = "Yes"
+            await pilot.press("enter", "x", "ctrl+s")
+            await pilot.pause()
+
+            assert viewer.edit_mode is True
+            assert source_path.read_text(encoding="utf-8") == "xalpha"
+            assert app._dirty_panes() == ()
+
+            await pilot.press("escape", "tab", "G", "i")
+            await pilot.press("n", "o", "t", "e", "ctrl+s")
+            await pilot.pause()
+
+            assert annotator.edit_mode is True
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == annotator.text
+            assert annotator.text.endswith("note")
+            assert app._dirty_panes() == ()
+
+    asyncio.run(scenario())
+
+
 def test_normal_undo_and_redo_buffered_edits_in_both_panes(
     tmp_path: Path,
 ) -> None:
@@ -429,6 +466,42 @@ def test_w_moves_to_word_starts_in_both_panes(tmp_path: Path) -> None:
             assert annotator.cursor_location == (1, 6)
             await pilot.press("w")
             assert annotator.cursor_location == (1, 8)
+
+    asyncio.run(scenario())
+
+
+def test_b_moves_backward_by_vim_words_in_both_panes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha, **beta** gamma", encoding="utf-8")
+        sidecar = tmp_path / "source.md.annotations.md"
+        sidecar.write_text("alpha, **beta** gamma", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.press("G", "b")
+            assert viewer.cursor_location == (0, 16)
+            await pilot.press("b")
+            assert viewer.cursor_location == (0, 13)
+            await pilot.press("b")
+            assert viewer.cursor_location == (0, 9)
+            await pilot.press("b")
+            assert viewer.cursor_location == (0, 7)
+
+            await pilot.press("tab", "G", "b")
+            assert annotator.cursor_location == (0, 16)
+            await pilot.press("b")
+            assert annotator.cursor_location == (0, 13)
+            await pilot.press("b")
+            assert annotator.cursor_location == (0, 9)
+            await pilot.press("b")
+            assert annotator.cursor_location == (0, 7)
 
     asyncio.run(scenario())
 

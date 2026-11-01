@@ -47,6 +47,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | `i` | Enter Edit mode for the focused pane |
 | Ctrl+W in Edit mode | Delete the previous word |
 | Ctrl+H in Edit mode | Delete the previous character |
+| Ctrl+S | Save dirty source and annotation buffers without quitting |
 | Escape or Ctrl+`[` in Edit mode | Return to Normal mode |
 | `u` in Normal mode | Undo the most recent edit batch |
 | Ctrl+R in Normal mode | Redo the most recently undone batch |
@@ -63,7 +64,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Escape | Clear the selection |
 | `q` or Ctrl+Q | Quit; prompt if either pane has unsaved changes |
 
-The `w` and `e` motions are available in both panes and follow Vim's
+The `w`, `b`, and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
 word, while adjacent non-blank symbols form another. Whitespace is skipped.
 
@@ -81,8 +82,9 @@ ranges and source highlights immediately reflect the edited annotation document.
 In either pane's Edit mode, printable keys and Enter edit at the cursor. Ctrl+W
 deletes the previous word, Ctrl+H deletes the previous character, and Escape or
 Ctrl+`[` returns to Normal mode. Ctrl+Q remains available to request quitting.
-Changed buffers are marked `MODIFIED` in the status line but are not written to
-disk immediately.
+Changed buffers are marked `MODIFIED` in the status line. Press Ctrl+S in either
+Normal or Edit mode to atomically save every dirty pane without quitting; Edit
+mode remains active.
 
 In Normal mode, `u` reverts the most recent in-memory edit batch in the focused
 pane and Ctrl+R reapplies the most recently undone batch. Separate Edit-mode
@@ -95,8 +97,8 @@ permissions. A new annotation cannot be added while either text buffer remains
 modified; save or discard those edits first.
 
 Source edits do not silently rewrite existing annotation ranges or quoted
-original text. After saving and reopening the files, press `R` to scan for stale
-annotations and review proposed rematches.
+original text. After saving with Ctrl+S and returning to Normal mode, press `R`
+to scan for stale annotations and review proposed rematches.
 
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is

@@ -124,6 +124,31 @@ def _vim_word_start_location(text_area: TextArea) -> tuple[int, int]:
     return text_area.cursor_location
 
 
+def _vim_word_previous_location(text_area: TextArea) -> tuple[int, int]:
+    """Return the start of the previous Vim word, including symbol words."""
+
+    text = text_area.text
+    cursor_index = text_area.document.get_index_from_location(
+        text_area.cursor_location
+    )
+    if cursor_index <= 0:
+        return text_area.cursor_location
+
+    search_index = cursor_index - 1
+    while search_index >= 0 and text[search_index].isspace():
+        search_index -= 1
+    if search_index < 0:
+        return text_area.document.get_location_from_index(0)
+
+    word_kind = _vim_word_kind(text[search_index])
+    while (
+        search_index > 0
+        and _vim_word_kind(text[search_index - 1]) == word_kind
+    ):
+        search_index -= 1
+    return text_area.document.get_location_from_index(search_index)
+
+
 def _vim_scroll_line(
     text_area: TextArea, direction: int, *, select: bool = False
 ) -> None:
@@ -469,7 +494,9 @@ class VimTextArea(TextArea):
         self.action_cursor_down(self._should_select(force_select))
 
     def action_vim_word_left(self) -> None:
-        self.action_cursor_word_left(self.visual_mode)
+        self.move_cursor(
+            _vim_word_previous_location(self), select=self.visual_mode
+        )
 
     def action_vim_word_right(self) -> None:
         self.move_cursor(
@@ -608,6 +635,7 @@ class AnnotationTextArea(TextArea):
         Binding("k,up", "cursor_up", "Up", show=False),
         Binding("l,right", "cursor_right", "Right", show=False),
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
+        Binding("b,ctrl+left", "vim_word_left", "Previous word", show=False),
         Binding("e", "vim_word_end", "End of word", show=False),
         Binding("i", "request_edit", "Edit annotations", show=False),
         Binding("u", "vim_undo", "Undo change", show=False),
@@ -674,6 +702,7 @@ class AnnotationTextArea(TextArea):
             "cursor_right",
             "cursor_up",
             "cursor_down",
+            "vim_word_left",
             "vim_word_right",
             "vim_word_end",
             "cursor_line_start",
@@ -839,6 +868,9 @@ class AnnotationTextArea(TextArea):
 
     def action_vim_word_right(self) -> None:
         self.move_cursor(_vim_word_start_location(self))
+
+    def action_vim_word_left(self) -> None:
+        self.move_cursor(_vim_word_previous_location(self))
 
     def action_vim_scroll_down_line(self) -> None:
         _vim_scroll_line(self, 1)
@@ -1095,7 +1127,7 @@ class EditWarningModal(ModalScreen[bool]):
                 id="edit-warning-path",
             )
             yield Static(
-                "You will choose Save or Discard when quitting.",
+                "Press Ctrl+S to save, or choose Save or Discard when quitting.",
                 markup=False,
                 id="edit-warning-annotations",
             )
@@ -2019,6 +2051,13 @@ class ViewerApp(App[None]):
             priority=True,
         ),
         Binding(
+            "ctrl+s",
+            "save_changes",
+            "Save changes",
+            show=False,
+            priority=True,
+        ),
+        Binding(
             "ctrl+w",
             "start_pane_switch",
             "Pane switch prefix",
@@ -2195,7 +2234,8 @@ class ViewerApp(App[None]):
     @staticmethod
     def _normal_help_text() -> str:
         return (
-            "Tab/Ctrl-W W panes  i edit  R rematch  S sync mode  . align  "
+            "Tab/Ctrl-W W panes  i edit  Ctrl-S save  R rematch  "
+            "S sync mode  . align  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
             "a annotate  q quit"
@@ -2204,7 +2244,7 @@ class ViewerApp(App[None]):
     @staticmethod
     def _edit_help_text() -> str:
         return (
-            "EDIT MODE  type to insert  Ctrl-W delete word  "
+            "EDIT MODE  type to insert  Ctrl-S save  Ctrl-W delete word  "
             "Ctrl-H delete char  Esc/Ctrl-[ normal  Ctrl-Q quit"
         )
 
@@ -2807,6 +2847,8 @@ class ViewerApp(App[None]):
         }:
             return False
         modal_open = isinstance(self.screen, ModalScreen)
+        if action == "save_changes" and (modal_open or search_input.has_focus):
+            return False
         if action in {"request_quit", "request_quit_force"} and modal_open:
             return False
         if action in {
@@ -2840,6 +2882,19 @@ class ViewerApp(App[None]):
 
     def action_request_quit_force(self) -> None:
         self._request_quit()
+
+    def action_save_changes(self) -> None:
+        """Persist dirty source and annotation buffers without quitting."""
+
+        dirty_panes = self._dirty_panes()
+        if not dirty_panes:
+            self.notify("No changes to save", timeout=1.5)
+            return
+        if self._save_dirty_changes():
+            self.notify(
+                f"Saved {', '.join(dirty_panes)}",
+                timeout=2,
+            )
 
     def _request_quit(self) -> None:
         dirty_panes = self._dirty_panes()
