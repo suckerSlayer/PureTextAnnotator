@@ -208,6 +208,7 @@ class VimTextArea(TextArea):
         Binding("a", "annotate", "Add annotation", show=False),
         Binding("i", "request_edit", "Edit source", show=False),
         Binding("u", "vim_undo", "Undo change", show=False),
+        Binding("ctrl+r", "vim_redo", "Redo change", show=False),
         Binding(
             "escape,ctrl+left_square_bracket",
             "exit_edit",
@@ -265,7 +266,7 @@ class VimTextArea(TextArea):
             int, tuple[tuple[int, int], ...]
         ] = {}
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
-        self._normal_undo_pending = False
+        self._normal_history_pending = False
         self.set_annotation_ranges(annotation_ranges)
 
     @property
@@ -431,6 +432,7 @@ class VimTextArea(TextArea):
             "annotate",
             "request_edit",
             "vim_undo",
+            "vim_redo",
             "yank",
         }
         if self.edit_mode and action in normal_mode_actions:
@@ -514,10 +516,17 @@ class VimTextArea(TextArea):
 
     def action_vim_undo(self) -> None:
         previous_text = self.text
-        self._normal_undo_pending = True
+        self._normal_history_pending = True
         self.undo()
         if self.text == previous_text:
-            self._normal_undo_pending = False
+            self._normal_history_pending = False
+
+    def action_vim_redo(self) -> None:
+        previous_text = self.text
+        self._normal_history_pending = True
+        self.redo()
+        if self.text == previous_text:
+            self._normal_history_pending = False
 
     def enter_edit_mode(self) -> None:
         """Make the source buffer editable after external confirmation."""
@@ -587,6 +596,7 @@ class AnnotationTextArea(TextArea):
         Binding("e", "vim_word_end", "End of word", show=False),
         Binding("i", "request_edit", "Edit annotations", show=False),
         Binding("u", "vim_undo", "Undo change", show=False),
+        Binding("ctrl+r", "vim_redo", "Redo change", show=False),
         Binding(
             "escape,ctrl+left_square_bracket",
             "exit_edit",
@@ -638,7 +648,7 @@ class AnnotationTextArea(TextArea):
         self._metadata_lines: frozenset[int] = frozenset()
         self._quote_lines: frozenset[int] = frozenset()
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
-        self._normal_undo_pending = False
+        self._normal_history_pending = False
         self.set_annotation_links(annotation_links)
 
     def check_action(
@@ -661,6 +671,7 @@ class AnnotationTextArea(TextArea):
             "vim_scroll_up_line",
             "request_edit",
             "vim_undo",
+            "vim_redo",
         }
         if self.edit_mode and action in normal_mode_actions:
             return False
@@ -825,10 +836,17 @@ class AnnotationTextArea(TextArea):
 
     def action_vim_undo(self) -> None:
         previous_text = self.text
-        self._normal_undo_pending = True
+        self._normal_history_pending = True
         self.undo()
         if self.text == previous_text:
-            self._normal_undo_pending = False
+            self._normal_history_pending = False
+
+    def action_vim_redo(self) -> None:
+        previous_text = self.text
+        self._normal_history_pending = True
+        self.redo()
+        if self.text == previous_text:
+            self._normal_history_pending = False
 
     def enter_edit_mode(self) -> None:
         self.history.checkpoint()
@@ -1052,7 +1070,7 @@ class EditWarningModal(ModalScreen[bool]):
                 id="edit-warning-title",
             )
             yield Static(
-                "Edit mode writes every change directly to the original file.",
+                "Edit mode changes the original text buffer.",
                 markup=False,
                 id="edit-warning-message",
             )
@@ -1062,7 +1080,7 @@ class EditWarningModal(ModalScreen[bool]):
                 id="edit-warning-path",
             )
             yield Static(
-                "Existing annotation ranges are not rewritten automatically.",
+                "You will choose Save or Discard when quitting.",
                 markup=False,
                 id="edit-warning-annotations",
             )
@@ -1104,6 +1122,120 @@ class EditWarningModal(ModalScreen[bool]):
         self.action_confirm()
 
     @on(Button.Pressed, "#cancel-edit")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
+class QuitChangesModal(ModalScreen[Optional[str]]):
+    """Choose whether dirty text buffers should be saved before quitting."""
+
+    CSS = """
+    QuitChangesModal {
+        align: center middle;
+    }
+
+    #quit-dialog {
+        width: 68%;
+        max-width: 72;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #quit-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #quit-message,
+    #quit-dirty-panes,
+    #quit-hint {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #quit-dirty-panes,
+    #quit-hint {
+        color: $text-muted;
+    }
+
+    #quit-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #quit-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("s", "save", "Save and quit", priority=True),
+        Binding("d", "discard", "Discard and quit", priority=True),
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(self, dirty_panes: tuple[str, ...]) -> None:
+        super().__init__()
+        self.dirty_panes = dirty_panes
+
+    def compose(self) -> ComposeResult:
+        pane_names = " and ".join(self.dirty_panes)
+        with Vertical(id="quit-dialog"):
+            yield Static(
+                "Unsaved changes",
+                markup=False,
+                id="quit-title",
+            )
+            yield Static(
+                "Save changes before quitting?",
+                markup=False,
+                id="quit-message",
+            )
+            yield Static(
+                f"Modified: {pane_names}",
+                markup=False,
+                id="quit-dirty-panes",
+            )
+            yield Static(
+                "S saves · D discards · Escape cancels",
+                markup=False,
+                id="quit-hint",
+            )
+            with Horizontal(id="quit-buttons"):
+                yield Button("Cancel", id="cancel-quit")
+                yield Button(
+                    "Discard",
+                    variant="error",
+                    id="discard-quit",
+                )
+                yield Button(
+                    "Save",
+                    variant="primary",
+                    id="save-quit",
+                )
+
+    def action_save(self) -> None:
+        self.dismiss("save")
+
+    def action_discard(self) -> None:
+        self.dismiss("discard")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#save-quit")
+    def on_save_pressed(self, _event: Button.Pressed) -> None:
+        self.action_save()
+
+    @on(Button.Pressed, "#discard-quit")
+    def on_discard_pressed(self, _event: Button.Pressed) -> None:
+        self.action_discard()
+
+    @on(Button.Pressed, "#cancel-quit")
     def on_cancel_pressed(self, _event: Button.Pressed) -> None:
         self.action_cancel()
 
@@ -1219,10 +1351,10 @@ class ViewerApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
+        Binding("q", "request_quit", "Quit"),
         Binding(
             "ctrl+q",
-            "force_quit",
+            "request_quit_force",
             "Quit",
             show=False,
             priority=True,
@@ -1290,6 +1422,7 @@ class ViewerApp(App[None]):
     ) -> None:
         super().__init__()
         self.source = source
+        self._saved_source = source
         self.soft_wrap = soft_wrap
         self._clipboard_writer = clipboard_writer
         self._source_writer = source_writer
@@ -1307,6 +1440,7 @@ class ViewerApp(App[None]):
             self.annotation_text = self.annotation_store.read_text()
         except AnnotationFileError as error:
             self.annotation_text = f"# Annotation file error\n\n{error}\n"
+        self._saved_annotation_text = self.annotation_text
         self.annotation_links = parse_annotation_links(self.annotation_text)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
@@ -1377,7 +1511,8 @@ class ViewerApp(App[None]):
         return (
             "Tab/Ctrl-W W panes  i edit  S sync mode  . align  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
-            "u undo  / search  n/N repeat  v select  a annotate  q quit"
+            "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
+            "a annotate  q quit"
         )
 
     @staticmethod
@@ -1390,8 +1525,19 @@ class ViewerApp(App[None]):
     def _refresh_titlebar(self) -> None:
         self.query_one("#titlebar", Static).update(self._titlebar_text())
 
+    def _dirty_panes(self) -> tuple[str, ...]:
+        dirty = []
+        if self.query_one("#viewer", VimTextArea).text != self._saved_source.text:
+            dirty.append("source")
+        if (
+            self.query_one("#annotator", AnnotationTextArea).text
+            != self._saved_annotation_text
+        ):
+            dirty.append("annotations")
+        return tuple(dirty)
+
     def _valid_annotation_links(self) -> tuple[AnnotationLink, ...]:
-        source_length = len(self.source.text)
+        source_length = len(self.query_one("#viewer", VimTextArea).text)
         return tuple(
             link
             for link in self.annotation_links
@@ -1464,7 +1610,7 @@ class ViewerApp(App[None]):
     def _align_annotation_to_source(self) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        offset = location_to_offset(self.source.text, viewer.cursor_location)
+        offset = location_to_offset(viewer.text, viewer.cursor_location)
         link = self._link_for_source_offset(offset)
         if link is None:
             annotator.clear_active_link()
@@ -1534,10 +1680,15 @@ class ViewerApp(App[None]):
             else "NORMAL"
         )
         selection_info = f"  |  {len(selected)} chars selected" if selected else ""
+        dirty_panes = self._dirty_panes()
+        modified_info = (
+            f"  |  MODIFIED: {', '.join(dirty_panes)}" if dirty_panes else ""
+        )
         wrap_info = "wrap" if target.soft_wrap else "no wrap"
         self.query_one("#status", Static).update(
             f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
-            f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}{selection_info}"
+            f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}"
+            f"{selection_info}{modified_info}"
         )
 
     def _focused_search_target(self) -> Optional[TextArea]:
@@ -1725,7 +1876,7 @@ class ViewerApp(App[None]):
             and annotator.has_focus
         )
         if editing_pane and action in {
-            "quit",
+            "request_quit",
             "start_pane_switch",
             "finish_pane_switch",
             "start_search",
@@ -1739,6 +1890,8 @@ class ViewerApp(App[None]):
         }:
             return False
         modal_open = isinstance(self.screen, ModalScreen)
+        if action in {"request_quit", "request_quit_force"} and modal_open:
+            return False
         if action in {
             "start_search",
             "search_next",
@@ -1764,8 +1917,60 @@ class ViewerApp(App[None]):
             return self._scroll_position_pending
         return super().check_action(action, parameters)
 
-    def action_force_quit(self) -> None:
-        self.exit()
+    def action_request_quit(self) -> None:
+        self._request_quit()
+
+    def action_request_quit_force(self) -> None:
+        self._request_quit()
+
+    def _request_quit(self) -> None:
+        dirty_panes = self._dirty_panes()
+        if not dirty_panes:
+            self.exit()
+            return
+        self.push_screen(
+            QuitChangesModal(dirty_panes),
+            callback=self._finish_quit_request,
+        )
+
+    def _finish_quit_request(self, choice: Optional[str]) -> None:
+        if choice is None:
+            self._refresh_status()
+            return
+        if choice == "discard":
+            self.exit()
+            return
+        if self._save_dirty_changes():
+            self.exit()
+
+    def _save_dirty_changes(self) -> bool:
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+
+        if viewer.text != self._saved_source.text:
+            try:
+                saved_source = self._source_writer(
+                    self._saved_source, viewer.text
+                )
+            except TextFileError as error:
+                self.notify(str(error), severity="error", timeout=5)
+                return False
+            self._saved_source = saved_source
+            self.source = saved_source
+            self._rebuild_source_line_starts()
+            self._refresh_titlebar()
+
+        if annotator.text != self._saved_annotation_text:
+            try:
+                saved_annotations = self.annotation_store.write(annotator.text)
+            except AnnotationFileError as error:
+                self.notify(str(error), severity="error", timeout=5)
+                self._refresh_status()
+                return False
+            self._saved_annotation_text = saved_annotations
+
+        self._refresh_status()
+        return True
 
     def _clear_pane_switch_prefix(self) -> None:
         self._pane_switch_pending = False
@@ -1862,33 +2067,20 @@ class ViewerApp(App[None]):
 
     @on(TextArea.Changed, "#viewer")
     def on_viewer_changed(self, event: TextArea.Changed) -> None:
-        """Persist each source edit atomically and refresh source metadata."""
+        """Track an in-memory source edit and refresh source metadata."""
 
         viewer = event.text_area
         assert isinstance(viewer, VimTextArea)
-        if not (viewer.edit_mode or viewer._normal_undo_pending):
+        if not (viewer.edit_mode or viewer._normal_history_pending):
             return
-        viewer._normal_undo_pending = False
-
-        try:
-            saved_source = self._source_writer(self.source, viewer.text)
-        except TextFileError as error:
-            cursor_row, cursor_column = viewer.cursor_location
-            viewer.leave_edit_mode()
-            viewer.load_text(self.source.text)
-            lines = self.source.text.split("\n")
-            cursor_row = min(cursor_row, len(lines) - 1)
-            cursor_column = min(cursor_column, len(lines[cursor_row]))
-            viewer.move_cursor((cursor_row, cursor_column))
-            viewer.set_annotation_ranges(self.annotation_ranges)
-            self.notify(
-                f"{error}; the unsaved edit was reverted",
-                severity="error",
-                timeout=5,
-            )
-            return
-
-        self.source = saved_source
+        viewer._normal_history_pending = False
+        text = viewer.text
+        self.source = LoadedTextFile(
+            path=self.source.path,
+            text=text,
+            size_bytes=len(text.encode("utf-8")),
+            line_count=0 if not text else text.count("\n") + 1,
+        )
         self._rebuild_source_line_starts()
         viewer.set_annotation_ranges(self.annotation_ranges)
         self._set_search_match("viewer", None)
@@ -1914,34 +2106,15 @@ class ViewerApp(App[None]):
 
     @on(TextArea.Changed, "#annotator")
     def on_annotator_changed(self, event: TextArea.Changed) -> None:
-        """Persist sidecar edits and rebuild annotation relationships."""
+        """Track a sidecar edit and rebuild annotation relationships."""
 
         annotator = event.text_area
         assert isinstance(annotator, AnnotationTextArea)
-        if not (annotator.edit_mode or annotator._normal_undo_pending):
+        if not (annotator.edit_mode or annotator._normal_history_pending):
             return
-        annotator._normal_undo_pending = False
-
-        try:
-            updated = self.annotation_store.write(annotator.text)
-        except AnnotationFileError as error:
-            cursor_row, cursor_column = annotator.cursor_location
-            annotator.leave_edit_mode()
-            annotator.load_text(self.annotation_text)
-            lines = self.annotation_text.split("\n")
-            cursor_row = min(cursor_row, len(lines) - 1)
-            cursor_column = min(cursor_column, len(lines[cursor_row]))
-            annotator.move_cursor((cursor_row, cursor_column))
-            annotator.set_annotation_links(self.annotation_links)
-            self.notify(
-                f"{error}; the unsaved edit was reverted",
-                severity="error",
-                timeout=5,
-            )
-            return
-
-        self.annotation_text = updated
-        self.annotation_links = parse_annotation_links(updated)
+        annotator._normal_history_pending = False
+        self.annotation_text = annotator.text
+        self.annotation_links = parse_annotation_links(self.annotation_text)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
         )
@@ -2031,6 +2204,13 @@ class ViewerApp(App[None]):
 
     @on(VimTextArea.AnnotationRequested)
     def on_annotation_requested(self, event: VimTextArea.AnnotationRequested) -> None:
+        if self._dirty_panes():
+            self.notify(
+                "Save or discard text edits before adding a note",
+                severity="warning",
+                timeout=3,
+            )
+            return
         try:
             draft = draft_from_selection(
                 self.source.text,
@@ -2063,6 +2243,7 @@ class ViewerApp(App[None]):
             return
 
         self.annotation_text = updated
+        self._saved_annotation_text = updated
         self.annotation_links = parse_annotation_links(updated)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links

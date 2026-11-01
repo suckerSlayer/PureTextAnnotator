@@ -49,6 +49,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Ctrl+H in Edit mode | Delete the previous character |
 | Escape or Ctrl+`[` in Edit mode | Return to Normal mode |
 | `u` in Normal mode | Undo the most recent edit batch |
+| Ctrl+R in Normal mode | Redo the most recently undone batch |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
@@ -59,7 +60,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Mouse drag | Select text |
 | `y`, Ctrl+C, or Cmd+C | Copy selected text |
 | Escape | Clear the selection |
-| `q` or Ctrl+Q | Quit |
+| `q` or Ctrl+Q | Quit; prompt if either pane has unsaved changes |
 
 The `w` and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
@@ -73,19 +74,24 @@ case-sensitive text `Yes` and press Enter (or select **Edit original**) to proce
 any other input is rejected. Escape cancels the warning.
 
 With the annotation pane focused, press `i` to enter Edit mode immediately; no
-warning or confirmation is shown. Changes are saved atomically to the complete
-Markdown sidecar, then reparsed so recorded ranges and source highlights reflect
-the edited annotation document.
+warning or confirmation is shown. Changes are reparsed in memory so recorded
+ranges and source highlights immediately reflect the edited annotation document.
 
 In either pane's Edit mode, printable keys and Enter edit at the cursor. Ctrl+W
 deletes the previous word, Ctrl+H deletes the previous character, and Escape or
-Ctrl+`[` returns to Normal mode. Ctrl+Q remains available to quit. Source changes
-are saved atomically to the original file while preserving its UTF-8 BOM, newline
-style, and permissions.
+Ctrl+`[` returns to Normal mode. Ctrl+Q remains available to request quitting.
+Changed buffers are marked `MODIFIED` in the status line but are not written to
+disk immediately.
 
-In Normal mode, `u` reverts the most recent edit batch in the focused pane and
-atomically saves the reverted source or annotation file. Separate Edit-mode
+In Normal mode, `u` reverts the most recent in-memory edit batch in the focused
+pane and Ctrl+R reapplies the most recently undone batch. Separate Edit-mode
 sessions create separate undo steps.
+
+When quitting with modified text, choose **Save** to atomically write every dirty
+buffer and quit, **Discard** to quit without writing, or **Cancel** to return to
+the application. Source saves preserve the UTF-8 BOM, newline style, and file
+permissions. A new annotation cannot be added while either text buffer remains
+modified; save or discard those edits first.
 
 Source edits do not rewrite existing annotation ranges or quoted original text.
 Those annotations therefore continue to refer to their previously recorded
@@ -145,12 +151,12 @@ dimmed so the current note remains easy to identify.
 - One file per application launch
 - `.txt`, `.md`, and `.markdown` files
 - UTF-8 input, including files with a UTF-8 byte-order mark
-- Guarded source editing and direct annotation editing with atomic saving
+- Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
 - Original quotation and source range recorded for every note
 - Literal search with forward/backward repetition in both panes
-- No annotation editing/deletion or automatic source-change recovery yet
+- No structured annotation deletion or automatic source-change recovery yet
 
 ## Test
 

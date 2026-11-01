@@ -13,6 +13,7 @@ from pure_text_annotator.app import (
     AnnotationTextArea,
     EditWarningModal,
     NoteModal,
+    QuitChangesModal,
     SearchInput,
     SyncMode,
     ViewerApp,
@@ -88,7 +89,7 @@ def test_source_edit_mode_requires_literal_capital_yes(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_edit_mode_writes_source_and_supports_vim_exit_keys(
+def test_edit_mode_buffers_source_and_supports_vim_exit_keys(
     tmp_path: Path,
 ) -> None:
     async def confirm_edit(pilot, app: ViewerApp) -> None:
@@ -117,7 +118,10 @@ def test_edit_mode_writes_source_and_supports_vim_exit_keys(
             await pilot.press("q", "w", "i", "z", "t", "b", "u")
             await pilot.pause()
             assert viewer.text == "alpha betaqwiztbu"
-            assert source_path.read_text(encoding="utf-8") == viewer.text
+            assert source_path.read_text(encoding="utf-8") == "alpha beta"
+            assert "MODIFIED: source" in app.query_one(
+                "#status", Static
+            ).render().plain
 
             await pilot.press("ctrl+w")
             await pilot.pause()
@@ -125,7 +129,7 @@ def test_edit_mode_writes_source_and_supports_vim_exit_keys(
             await pilot.press("ctrl+h", "!", "enter", "z")
             await pilot.pause()
             assert viewer.text == "alpha!\nz"
-            assert source_path.read_text(encoding="utf-8") == "alpha!\nz"
+            assert source_path.read_text(encoding="utf-8") == "alpha beta"
 
             await pilot.press("ctrl+left_square_bracket")
             await pilot.pause()
@@ -144,7 +148,7 @@ def test_edit_mode_writes_source_and_supports_vim_exit_keys(
     asyncio.run(scenario())
 
 
-def test_failed_source_save_reverts_the_edit(tmp_path: Path) -> None:
+def test_failed_quit_save_keeps_the_dirty_buffer(tmp_path: Path) -> None:
     def fail_to_save(
         _source: LoadedTextFile, _text: str
     ) -> LoadedTextFile:
@@ -165,18 +169,90 @@ def test_failed_source_save_reverts_the_edit(tmp_path: Path) -> None:
             await pilot.pause()
             confirmation = app.screen.query_one("#edit-confirmation", Input)
             confirmation.value = "Yes"
-            await pilot.press("enter", "x")
+            await pilot.press("enter", "x", "escape", "q")
             await pilot.pause()
 
-            assert viewer.text == "alpha"
+            assert isinstance(app.screen, QuitChangesModal)
+            await pilot.press("s")
+            await pilot.pause()
+
+            assert viewer.text == "xalpha"
             assert source_path.read_text(encoding="utf-8") == "alpha"
             assert viewer.edit_mode is False
             assert viewer.read_only is True
+            assert not isinstance(app.screen, QuitChangesModal)
+            assert app._dirty_panes() == ("source",)
 
     asyncio.run(scenario())
 
 
-def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
+def test_quit_prompt_can_cancel_or_discard_changes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("i")
+            await pilot.pause()
+            confirmation = app.screen.query_one("#edit-confirmation", Input)
+            confirmation.value = "Yes"
+            await pilot.press("enter", "x", "escape", "q")
+            await pilot.pause()
+
+            assert isinstance(app.screen, QuitChangesModal)
+            assert app.screen.dirty_panes == ("source",)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, QuitChangesModal)
+            assert viewer.text == "xalpha"
+            assert source_path.read_text(encoding="utf-8") == "alpha"
+
+            await pilot.press("q")
+            await pilot.pause()
+            assert isinstance(app.screen, QuitChangesModal)
+            await pilot.press("d")
+
+        assert source_path.read_text(encoding="utf-8") == "alpha"
+
+    asyncio.run(scenario())
+
+
+def test_quit_prompt_saves_all_dirty_panes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+        saved_annotation_text = ""
+
+        async with app.run_test(size=(100, 22)) as pilot:
+            await pilot.press("i")
+            await pilot.pause()
+            confirmation = app.screen.query_one("#edit-confirmation", Input)
+            confirmation.value = "Yes"
+            await pilot.press("enter", "x", "escape", "tab", "G", "i")
+            await pilot.press("n", "o", "t", "e", "ctrl+q")
+            await pilot.pause()
+
+            assert isinstance(app.screen, QuitChangesModal)
+            assert app.screen.dirty_panes == ("source", "annotations")
+            saved_annotation_text = app.query_one(AnnotationTextArea).text
+            await pilot.press("s")
+
+        assert source_path.read_text(encoding="utf-8") == "xalpha"
+        assert app.annotation_store.path.read_text(
+            encoding="utf-8"
+        ) == saved_annotation_text
+
+    asyncio.run(scenario())
+
+
+def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -203,16 +279,12 @@ def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
             await pilot.press("q", "w", "i", "z", "t", "b", "u")
             await pilot.pause()
             assert annotator.text.endswith("qwiztbu")
-            assert app.annotation_store.path.read_text(
-                encoding="utf-8"
-            ) == annotator.text
+            assert not app.annotation_store.path.exists()
 
             await pilot.press("ctrl+w", "x", "ctrl+h", "n", "o", "t", "e")
             await pilot.pause()
             assert annotator.text.endswith("note")
-            assert app.annotation_store.path.read_text(
-                encoding="utf-8"
-            ) == annotator.text
+            assert not app.annotation_store.path.exists()
             assert viewer.text == "alpha"
 
             await pilot.press("ctrl+left_square_bracket")
@@ -227,7 +299,7 @@ def test_annotation_edit_mode_needs_no_warning_and_saves_sidecar(
     asyncio.run(scenario())
 
 
-def test_normal_u_undoes_and_persists_edits_in_both_panes(
+def test_normal_undo_and_redo_buffered_edits_in_both_panes(
     tmp_path: Path,
 ) -> None:
     async def confirm_source_edit(pilot, app: ViewerApp) -> None:
@@ -260,6 +332,14 @@ def test_normal_u_undoes_and_persists_edits_in_both_panes(
             assert viewer.text == "alpha"
             assert source_path.read_text(encoding="utf-8") == "alpha"
 
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert viewer.text == "alphaxyz"
+            assert source_path.read_text(encoding="utf-8") == "alpha"
+            await pilot.press("u")
+            await pilot.pause()
+            assert viewer.text == "alpha"
+
             initial_annotations = app.annotation_store.initial_text()
             await pilot.press("tab", "G", "i", "x", "y", "z", "escape")
             await pilot.pause()
@@ -268,9 +348,15 @@ def test_normal_u_undoes_and_persists_edits_in_both_panes(
             await pilot.press("u")
             await pilot.pause()
             assert annotator.text == initial_annotations
-            assert app.annotation_store.path.read_text(
-                encoding="utf-8"
-            ) == initial_annotations
+            assert not app.annotation_store.path.exists()
+
+            await pilot.press("ctrl+r")
+            await pilot.pause()
+            assert annotator.text == initial_annotations + "xyz"
+            assert not app.annotation_store.path.exists()
+            await pilot.press("u")
+            await pilot.pause()
+            assert annotator.text == initial_annotations
 
     asyncio.run(scenario())
 
