@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -9,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 
 Location = Tuple[int, int]
@@ -62,6 +63,12 @@ class AnnotationRecord:
     quote: str
     note: str
     created_at: str
+    source_sha256: Optional[str] = None
+    quote_sha256: Optional[str] = None
+    prefix: Optional[str] = None
+    suffix: Optional[str] = None
+    original_start: Optional[int] = None
+    original_end: Optional[int] = None
 
 
 def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
@@ -273,6 +280,7 @@ def create_record(
     *,
     annotation_id: Optional[str] = None,
     created_at: Optional[str] = None,
+    source_text: Optional[str] = None,
 ) -> AnnotationRecord:
     """Turn a selected range and note into a persistent record."""
 
@@ -281,6 +289,24 @@ def create_record(
     timestamp = created_at or datetime.now(timezone.utc).isoformat(
         timespec="seconds"
     ).replace("+00:00", "Z")
+    anchor = {}
+    if source_text is not None:
+        if not 0 <= draft.start < draft.end <= len(source_text):
+            raise ValueError("annotation range is outside the source text")
+        if source_text[draft.start : draft.end] != draft.quote:
+            raise ValueError("annotation quote does not match the source range")
+        anchor = {
+            "source_sha256": hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
+            "quote_sha256": hashlib.sha256(
+                draft.quote.encode("utf-8")
+            ).hexdigest(),
+            "prefix": source_text[max(0, draft.start - 80) : draft.start],
+            "suffix": source_text[draft.end : draft.end + 80],
+            "original_start": draft.start,
+            "original_end": draft.end,
+        }
     return AnnotationRecord(
         annotation_id=annotation_id or str(uuid.uuid4()),
         start=draft.start,
@@ -288,6 +314,7 @@ def create_record(
         quote=draft.quote,
         note=note.rstrip(),
         created_at=timestamp,
+        **anchor,
     )
 
 
@@ -349,6 +376,24 @@ class AnnotationStore:
         annotation_id = json.dumps(record.annotation_id, ensure_ascii=False)
         created_at = json.dumps(record.created_at, ensure_ascii=False)
         quote = self._quote_block(record.quote)
+        anchor = ""
+        if (
+            record.source_sha256 is not None
+            and record.quote_sha256 is not None
+            and record.prefix is not None
+            and record.suffix is not None
+            and record.original_start is not None
+            and record.original_end is not None
+        ):
+            anchor = (
+                "anchor:\n"
+                f"  source_sha256: {json.dumps(record.source_sha256)}\n"
+                f"  quote_sha256: {json.dumps(record.quote_sha256)}\n"
+                f"  prefix: {json.dumps(record.prefix, ensure_ascii=False)}\n"
+                f"  suffix: {json.dumps(record.suffix, ensure_ascii=False)}\n"
+                f"  original_start: {record.original_start}\n"
+                f"  original_end: {record.original_end}\n"
+            )
         return (
             f"{self.MARKER}id={annotation_id} -->\n"
             f"## Annotation {ordinal}\n\n"
@@ -359,6 +404,7 @@ class AnnotationStore:
             f"  start: {record.start}\n"
             f"  end: {record.end}\n"
             f"created_at: {created_at}\n"
+            f"{anchor}"
             "```\n\n"
             "### Original text\n\n"
             f"{quote}\n\n"
@@ -389,6 +435,85 @@ class AnnotationStore:
 
         self._atomic_write(text)
         return text
+
+    def transactional_write(
+        self,
+        text: str,
+        *,
+        backup_label: str,
+        validate: Callable[[str], None],
+    ) -> Tuple[str, Optional[Path]]:
+        """Write, validate, and roll back while retaining an exact backup."""
+
+        original_exists = self.path.exists()
+        original = self.path.read_bytes() if original_exists else b""
+        backup_path: Optional[Path] = None
+        if original_exists:
+            candidate = self.path.with_name(
+                f"{self.path.name}.{backup_label}"
+            )
+            counter = 2
+            while candidate.exists():
+                candidate = self.path.with_name(
+                    f"{self.path.name}.{backup_label}-{counter}"
+                )
+                counter += 1
+            try:
+                self._atomic_write_bytes(candidate, original)
+            except OSError as error:
+                raise AnnotationFileError(
+                    f"cannot create annotation backup {candidate}: {error}"
+                ) from error
+            backup_path = candidate
+
+        try:
+            self._atomic_write(text)
+            saved = self.read_text()
+            validate(saved)
+        except Exception as error:
+            try:
+                if original_exists:
+                    self._atomic_write_bytes(self.path, original)
+                else:
+                    self.path.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                raise AnnotationFileError(
+                    "rematch validation failed and rollback also failed: "
+                    f"{rollback_error}"
+                ) from error
+            if isinstance(error, AnnotationFileError):
+                raise
+            raise AnnotationFileError(
+                f"rematch validation failed; original sidecar restored: {error}"
+            ) from error
+        return saved, backup_path
+
+    @staticmethod
+    def _atomic_write_bytes(path: Path, data: bytes) -> None:
+        """Atomically replace ``path`` with exact bytes."""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(data)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, path)
+        except OSError:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
     def _atomic_write(self, text: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

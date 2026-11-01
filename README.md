@@ -52,6 +52,7 @@ Use `--no-wrap` to keep long lines unwrapped.
 | Ctrl+R in Normal mode | Redo the most recently undone batch |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
+| `R` | Scan stale annotations and open rematch review |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
 | `.` | Manually align the other pane from the focused pane |
 | Tab / Shift+Tab | Switch between source and annotation panes |
@@ -93,9 +94,9 @@ the application. Source saves preserve the UTF-8 BOM, newline style, and file
 permissions. A new annotation cannot be added while either text buffer remains
 modified; save or discard those edits first.
 
-Source edits do not rewrite existing annotation ranges or quoted original text.
-Those annotations therefore continue to refer to their previously recorded
-Unicode offsets until source-change recovery is implemented.
+Source edits do not silently rewrite existing annotation ranges or quoted
+original text. After saving and reopening the files, press `R` to scan for stale
+annotations and review proposed rematches.
 
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is
@@ -105,6 +106,49 @@ Search is literal and case-sensitive. Press `/` in either pane, enter the text,
 and press Enter. The current match is highlighted and centered; `n` and `N`
 continue through matches with wraparound. Escape closes the search prompt
 without moving the cursor. Each pane remembers its own most recent query.
+
+## Recover stale annotation ranges
+
+Press `R` in Normal mode with clean, saved buffers. The scan is read-only: it
+classifies each annotation as Healthy, Shifted, Modified, Ambiguous, Orphaned,
+or Malformed, then searches exact text, conservatively normalized text, saved
+prefix/suffix context, deterministic fuzzy candidates, and neighboring
+annotation order. No network or AI service is used.
+
+The review shows old and proposed ranges, quotation changes, evidence, and a
+rounded approximate correctness estimate. Use `J`/`K` to navigate, Space to
+accept or skip, and `C` to cycle alternatives. Proposals estimated at 90% or
+higher are preselected; lower-confidence and ambiguous proposals require an
+explicit choice. Orphaned and malformed annotations remain unchanged.
+
+For a manual match, cancel review, make a Visual selection in the source pane,
+press `R`, navigate to the intended annotation, and press `M`. The selected span
+receives an estimate and follows the same confirmation path.
+
+Ctrl+S from review opens the only rematch Apply confirmation. It reports the
+average and lowest selected estimates plus ambiguous and unresolved counts.
+Cancel and Review again do not write anything. **Apply rematch** rechecks source
+and sidecar fingerprints, creates a timestamped `before-rematch` backup, updates
+only the selected sidecar ranges and quoted text, records rematch history,
+atomically writes, reparses, and rolls back on failed validation. The source file
+is never changed by rematching.
+
+Estimates are transparent heuristics rather than guarantees. Short, duplicated,
+or substantially changed quotations are deliberately penalized; leaving a note
+unresolved is preferred to attaching it to weakly related text.
+
+### Try the resettable cases
+
+```bash
+pta-view examples/rematch_cases/cases.md
+```
+
+This marked sample covers a shifted range, a slight edit, duplicate quotation,
+and deletion. Its first `R` opens a separate reset warning; after confirming the
+reset, press `R` again for rematch review. See
+[`examples/rematch_cases/README.md`](examples/rematch_cases/README.md) for the
+walkthrough. Applying a demo rematch makes its next `R` offer the baseline reset
+again.
 
 ## Alignment modes
 
@@ -154,9 +198,12 @@ dimmed so the current note remains easy to identify.
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
-- Original quotation and source range recorded for every note
+- Original quotation, source range, hashes, and bounded context recorded for
+  new notes
+- Review-first deterministic rematching with confidence estimates, backup,
+  validation, and rollback
 - Literal search with forward/backward repetition in both panes
-- No structured annotation deletion or automatic source-change recovery yet
+- No structured annotation deletion or semantic/AI matching yet
 
 ## Test
 

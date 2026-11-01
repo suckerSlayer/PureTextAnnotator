@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from datetime import datetime, timezone
+import difflib
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
@@ -31,7 +33,20 @@ from .annotations import (
     parse_annotation_links,
 )
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
-from .files import LoadedTextFile, TextFileError, save_text_file
+from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
+from .files import LoadedTextFile, TextFileError, load_text_file, save_text_file
+from .rematch import (
+    RematchChoice,
+    RematchItem,
+    RematchReport,
+    RematchStatus,
+    apply_rematches,
+    confidence_summary,
+    make_manual_candidate,
+    scan_rematches,
+    text_sha256,
+    validate_applied_rematches,
+)
 
 
 ClipboardWriter = Callable[[str], Optional[str]]
@@ -1240,6 +1255,650 @@ class QuitChangesModal(ModalScreen[Optional[str]]):
         self.action_cancel()
 
 
+class DemoResetModal(ModalScreen[bool]):
+    """Warn before restoring a marked rematch demonstration baseline."""
+
+    CSS = """
+    DemoResetModal {
+        align: center middle;
+    }
+
+    #demo-reset-dialog {
+        width: 76%;
+        max-width: 84;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #demo-reset-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #demo-reset-message,
+    #demo-reset-description,
+    #demo-reset-hint {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #demo-reset-description,
+    #demo-reset-hint {
+        color: $text-muted;
+    }
+
+    #demo-reset-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #demo-reset-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(self, demo: DemoCase) -> None:
+        super().__init__()
+        self.demo = demo
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="demo-reset-dialog"):
+            yield Static(
+                "Reset rematch demo case?",
+                markup=False,
+                id="demo-reset-title",
+            )
+            yield Static(
+                f"{self.demo.name}\n\n"
+                "This is a marked sample. Before its first rematch scan, R "
+                "restores both the source and annotation sidecar to the "
+                "deliberately stale default case. Any changes in these two "
+                "demo files will be discarded.",
+                markup=False,
+                id="demo-reset-message",
+            )
+            yield Static(
+                self.demo.description,
+                markup=False,
+                id="demo-reset-description",
+            )
+            yield Static(
+                "After resetting, press R again to inspect the rematch proposals.",
+                markup=False,
+                id="demo-reset-hint",
+            )
+            with Horizontal(id="demo-reset-buttons"):
+                yield Button("Cancel", id="cancel-demo-reset")
+                yield Button(
+                    "Reset demo",
+                    variant="warning",
+                    id="confirm-demo-reset",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-demo-reset", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#cancel-demo-reset")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-demo-reset")
+    def on_confirm_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss(True)
+
+
+class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
+    """Review read-only rematch proposals before requesting confirmation."""
+
+    CSS = """
+    RematchReviewModal {
+        align: center middle;
+    }
+
+    #rematch-review-dialog {
+        width: 92%;
+        max-width: 116;
+        height: 92%;
+        padding: 1 2;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #rematch-review-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #rematch-review-summary,
+    #rematch-review-hint {
+        height: auto;
+        margin-bottom: 1;
+        color: $text-muted;
+    }
+
+    #rematch-review-list {
+        height: 10;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: solid $primary;
+        overflow-y: auto;
+    }
+
+    #rematch-review-detail {
+        height: 1fr;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: solid $secondary;
+        overflow-y: auto;
+    }
+
+    #rematch-review-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #rematch-review-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("j,down", "next_item", "Next", priority=True, show=False),
+        Binding("k,up", "previous_item", "Previous", priority=True, show=False),
+        Binding("space", "toggle_choice", "Accept/skip", priority=True, show=False),
+        Binding("c", "cycle_candidate", "Next candidate", priority=True, show=False),
+        Binding("m", "use_manual_selection", "Use source selection", priority=True, show=False),
+        Binding("ctrl+s", "continue_to_confirmation", "Apply selected", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        report: RematchReport,
+        source_text: str,
+        manual_source_range: Optional[AnnotationRange] = None,
+        initial_choices: Iterable[RematchChoice] = (),
+    ) -> None:
+        super().__init__()
+        self.report = report
+        self.source_text = source_text
+        self.manual_source_range = manual_source_range
+        self.items = report.stale_items
+        self.current_index = 0
+        initial_by_id = {
+            choice.annotation_id: choice for choice in initial_choices
+        }
+        self.candidates_by_id: dict[str, tuple] = {}
+        self.candidate_indices: dict[str, int] = {}
+        self.selected_ids: set[str] = set()
+        for item in self.items:
+            annotation_id = item.annotation.annotation_id
+            candidates = list(item.candidates)
+            if manual_source_range is not None and not item.annotation.errors:
+                try:
+                    manual_candidate = make_manual_candidate(
+                        source_text,
+                        item.annotation,
+                        manual_source_range,
+                    )
+                except ValueError:
+                    manual_candidate = None
+                if (
+                    manual_candidate is not None
+                    and all(
+                        candidate.source_range != manual_candidate.source_range
+                        for candidate in candidates
+                    )
+                ):
+                    candidates.append(manual_candidate)
+            self.candidates_by_id[annotation_id] = tuple(candidates)
+            initial = initial_by_id.get(annotation_id)
+            candidate_index = 0
+            if initial is not None:
+                for index, candidate in enumerate(candidates):
+                    if candidate.source_range == initial.candidate.source_range:
+                        candidate_index = index
+                        break
+                self.selected_ids.add(annotation_id)
+            elif (
+                item.proposed is not None
+                and item.proposed.confidence >= 90
+                and item.status is not RematchStatus.AMBIGUOUS
+            ):
+                self.selected_ids.add(annotation_id)
+            self.candidate_indices[annotation_id] = candidate_index
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="rematch-review-dialog"):
+            yield Static(
+                "Review annotation rematches",
+                markup=False,
+                id="rematch-review-title",
+            )
+            yield Static("", markup=False, id="rematch-review-summary")
+            yield Static("", markup=False, id="rematch-review-list")
+            yield Static("", markup=False, id="rematch-review-detail")
+            yield Static(
+                "J/K navigate · Space accepts/skips · C cycles alternatives · "
+                "M uses the Visual selection made in the source pane · "
+                "Ctrl+S continues to the confirmation prompt",
+                markup=False,
+                id="rematch-review-hint",
+            )
+            with Horizontal(id="rematch-review-buttons"):
+                yield Button("Cancel", id="cancel-rematch-review")
+                yield Button("Previous", id="previous-rematch-item")
+                yield Button("Next", id="next-rematch-item")
+                yield Button("Accept / Skip", id="toggle-rematch-choice")
+                yield Button("Next candidate", id="cycle-rematch-candidate")
+                yield Button("Use selection", id="manual-rematch-candidate")
+                yield Button(
+                    "Apply selected…",
+                    variant="primary",
+                    id="continue-rematch",
+                )
+
+    def on_mount(self) -> None:
+        self._refresh_review()
+        self.query_one("#cancel-rematch-review", Button).focus()
+
+    @staticmethod
+    def _shorten(text: str, limit: int = 100) -> str:
+        flattened = text.replace("\n", " ↵ ")
+        return flattened if len(flattened) <= limit else flattened[: limit - 1] + "…"
+
+    def _current_item(self) -> Optional[RematchItem]:
+        if not self.items:
+            return None
+        return self.items[self.current_index]
+
+    def _current_candidate(self, item: RematchItem):
+        candidates = self.candidates_by_id[item.annotation.annotation_id]
+        if not candidates:
+            return None
+        index = self.candidate_indices[item.annotation.annotation_id]
+        return candidates[index]
+
+    def _refresh_review(self) -> None:
+        counts = "  ".join(
+            f"{status.value}: {self.report.count(status)}"
+            for status in (
+                RematchStatus.SHIFTED,
+                RematchStatus.MODIFIED,
+                RematchStatus.AMBIGUOUS,
+                RematchStatus.ORPHANED,
+                RematchStatus.MALFORMED,
+            )
+            if self.report.count(status)
+        )
+        self.query_one("#rematch-review-summary", Static).update(
+            f"Read-only scan · {len(self.selected_ids)} selected · {counts}"
+        )
+
+        overview = []
+        for index, item in enumerate(self.items):
+            annotation_id = item.annotation.annotation_id
+            pointer = ">" if index == self.current_index else " "
+            selected = "x" if annotation_id in self.selected_ids else " "
+            candidate = self._current_candidate(item)
+            proposal = (
+                f"[{candidate.source_range.start}, {candidate.source_range.end}) "
+                f"~{candidate.confidence}%"
+                if candidate is not None
+                else "no safe candidate"
+            )
+            overview.append(
+                f"{pointer} [{selected}] Annotation {item.annotation.ordinal} "
+                f"{item.status.value}: {proposal}"
+            )
+        self.query_one("#rematch-review-list", Static).update(
+            "\n".join(overview) or "No stale annotations."
+        )
+
+        item = self._current_item()
+        if item is None:
+            self.query_one("#rematch-review-detail", Static).update(
+                "Nothing needs review."
+            )
+            return
+        record = item.annotation
+        candidate = self._current_candidate(item)
+        old_range = (
+            f"[{record.start}, {record.end})"
+            if record.start is not None and record.end is not None
+            else "unavailable"
+        )
+        lines = [
+            f"Annotation {record.ordinal} · {record.annotation_id}",
+            f"Status: {item.status.value}",
+            f"Old range: {old_range}",
+            f"Reason: {item.explanation}",
+            "",
+            "Stored quotation:",
+            self._shorten(record.quote or "(unavailable)", 500),
+        ]
+        if candidate is not None:
+            lines.extend(
+                [
+                    "",
+                    f"Candidate {self.candidate_indices[record.annotation_id] + 1} "
+                    f"of {len(self.candidates_by_id[record.annotation_id])}",
+                    f"Proposed range: [{candidate.source_range.start}, "
+                    f"{candidate.source_range.end})",
+                    f"Estimated correctness: ~{candidate.confidence}%",
+                    f"Method: {candidate.method}",
+                    "Evidence: " + "; ".join(candidate.evidence),
+                    "",
+                    "Proposed current source text:",
+                    self._shorten(candidate.text, 500),
+                ]
+            )
+            if record.quote != candidate.text:
+                diff = list(
+                    difflib.unified_diff(
+                        (record.quote or "").splitlines(),
+                        candidate.text.splitlines(),
+                        fromfile="stored quote",
+                        tofile="proposed source",
+                        lineterm="",
+                    )
+                )
+                lines.extend(["", "Diff:", *diff[:20]])
+        else:
+            lines.extend(
+                [
+                    "",
+                    "No automatic candidate is offered. This annotation will "
+                    "remain unchanged.",
+                ]
+            )
+        self.query_one("#rematch-review-detail", Static).update("\n".join(lines))
+
+    def action_next_item(self) -> None:
+        if self.items:
+            self.current_index = (self.current_index + 1) % len(self.items)
+            self._refresh_review()
+
+    def action_previous_item(self) -> None:
+        if self.items:
+            self.current_index = (self.current_index - 1) % len(self.items)
+            self._refresh_review()
+
+    def action_toggle_choice(self) -> None:
+        item = self._current_item()
+        if (
+            item is None
+            or not self.candidates_by_id[item.annotation.annotation_id]
+        ):
+            self.notify(
+                "This annotation has no safe candidate",
+                severity="warning",
+                timeout=1.5,
+            )
+            return
+        annotation_id = item.annotation.annotation_id
+        if annotation_id in self.selected_ids:
+            self.selected_ids.remove(annotation_id)
+        else:
+            self.selected_ids.add(annotation_id)
+        self._refresh_review()
+
+    def action_cycle_candidate(self) -> None:
+        item = self._current_item()
+        if item is None:
+            return
+        candidates = self.candidates_by_id[item.annotation.annotation_id]
+        if len(candidates) < 2:
+            self.notify("No alternative candidate", timeout=1.25)
+            return
+        annotation_id = item.annotation.annotation_id
+        self.candidate_indices[annotation_id] = (
+            self.candidate_indices[annotation_id] + 1
+        ) % len(candidates)
+        self._refresh_review()
+
+    def action_use_manual_selection(self) -> None:
+        item = self._current_item()
+        if item is None or self.manual_source_range is None:
+            self.notify(
+                "Make a Visual selection in the source pane before pressing R",
+                severity="warning",
+                timeout=2.5,
+            )
+            return
+        candidates = self.candidates_by_id[item.annotation.annotation_id]
+        manual_index = next(
+            (
+                index
+                for index, candidate in enumerate(candidates)
+                if candidate.method == "manual-selection"
+            ),
+            None,
+        )
+        if manual_index is None:
+            self.notify(
+                "That selection is already the current automatic candidate or "
+                "cannot be used for this record",
+                severity="warning",
+                timeout=2,
+            )
+            return
+        annotation_id = item.annotation.annotation_id
+        self.candidate_indices[annotation_id] = manual_index
+        self.selected_ids.add(annotation_id)
+        self._refresh_review()
+
+    def _choices(self) -> tuple[RematchChoice, ...]:
+        choices = []
+        for item in self.items:
+            annotation_id = item.annotation.annotation_id
+            if annotation_id not in self.selected_ids:
+                continue
+            candidate = self._current_candidate(item)
+            if candidate is not None:
+                choices.append(RematchChoice(annotation_id, candidate))
+        return tuple(choices)
+
+    def action_continue_to_confirmation(self) -> None:
+        choices = self._choices()
+        if not choices:
+            self.notify(
+                "Select at least one proposal to apply",
+                severity="warning",
+                timeout=1.75,
+            )
+            return
+        self.dismiss(choices)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#next-rematch-item")
+    def on_next_pressed(self, _event: Button.Pressed) -> None:
+        self.action_next_item()
+
+    @on(Button.Pressed, "#previous-rematch-item")
+    def on_previous_pressed(self, _event: Button.Pressed) -> None:
+        self.action_previous_item()
+
+    @on(Button.Pressed, "#toggle-rematch-choice")
+    def on_toggle_pressed(self, _event: Button.Pressed) -> None:
+        self.action_toggle_choice()
+
+    @on(Button.Pressed, "#cycle-rematch-candidate")
+    def on_cycle_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cycle_candidate()
+
+    @on(Button.Pressed, "#manual-rematch-candidate")
+    def on_manual_pressed(self, _event: Button.Pressed) -> None:
+        self.action_use_manual_selection()
+
+    @on(Button.Pressed, "#continue-rematch")
+    def on_continue_pressed(self, _event: Button.Pressed) -> None:
+        self.action_continue_to_confirmation()
+
+    @on(Button.Pressed, "#cancel-rematch-review")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
+class RematchConfirmModal(ModalScreen[Optional[str]]):
+    """The single confirmation gate before a rematch changes a sidecar."""
+
+    CSS = """
+    RematchConfirmModal {
+        align: center middle;
+    }
+
+    #rematch-confirm-dialog {
+        width: 78%;
+        max-width: 88;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #rematch-confirm-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #rematch-confirm-message,
+    #rematch-confirm-safety,
+    #rematch-confirm-hint {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #rematch-confirm-safety,
+    #rematch-confirm-hint {
+        color: $text-muted;
+    }
+
+    #rematch-confirm-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #rematch-confirm-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        report: RematchReport,
+        choices: tuple[RematchChoice, ...],
+    ) -> None:
+        super().__init__()
+        self.report = report
+        self.choices = choices
+
+    def compose(self) -> ComposeResult:
+        average, lowest = confidence_summary(self.choices)
+        selected_ids = {choice.annotation_id for choice in self.choices}
+        high = sum(choice.candidate.confidence >= 90 for choice in self.choices)
+        reviewed = len(self.choices) - high
+        method_counts: dict[str, int] = {}
+        for choice in self.choices:
+            method_counts[choice.candidate.method] = (
+                method_counts.get(choice.candidate.method, 0) + 1
+            )
+        evidence_summary = ", ".join(
+            f"{method.replace('-', ' ')}: {count}"
+            for method, count in sorted(method_counts.items())
+        )
+        strong_context = sum(
+            choice.candidate.context_similarity >= 0.90
+            for choice in self.choices
+        )
+        ambiguous_skipped = sum(
+            item.status is RematchStatus.AMBIGUOUS
+            and item.annotation.annotation_id not in selected_ids
+            for item in self.report.items
+        )
+        unresolved = sum(
+            item.status in {RematchStatus.ORPHANED, RematchStatus.MALFORMED}
+            and item.annotation.annotation_id not in selected_ids
+            for item in self.report.items
+        )
+        with Vertical(id="rematch-confirm-dialog"):
+            yield Static(
+                "Apply annotation rematch?",
+                markup=False,
+                id="rematch-confirm-title",
+            )
+            yield Static(
+                f"{len(self.choices)} annotation(s) will be updated.\n"
+                f"Estimated correctness: ~{average}% average per selected annotation\n"
+                f"Lowest selected estimate: ~{lowest}%\n"
+                f"High confidence: {high}   Review accepted: {reviewed}\n"
+                f"Ambiguous skipped: {ambiguous_skipped}   Unresolved: {unresolved}\n"
+                f"Evidence: {evidence_summary}; strong saved context: "
+                f"{strong_context}",
+                markup=False,
+                id="rematch-confirm-message",
+            )
+            yield Static(
+                "This changes ranges and quoted original text in the annotation "
+                "sidecar only. The source file will not be changed. A timestamped "
+                "backup is created before the atomic, validated write.",
+                markup=False,
+                id="rematch-confirm-safety",
+            )
+            yield Static(
+                "Cancel is focused by default.",
+                markup=False,
+                id="rematch-confirm-hint",
+            )
+            with Horizontal(id="rematch-confirm-buttons"):
+                yield Button("Cancel", id="cancel-rematch-confirm")
+                yield Button("Review again", id="review-rematch-again")
+                yield Button(
+                    "Apply rematch",
+                    variant="warning",
+                    id="apply-rematch-confirm",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-rematch-confirm", Button).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#cancel-rematch-confirm")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#review-rematch-again")
+    def on_review_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss("review")
+
+    @on(Button.Pressed, "#apply-rematch-confirm")
+    def on_apply_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss("apply")
+
+
 class ViewerApp(App[None]):
     """Display one source file beside its persistent annotation sidecar."""
 
@@ -1387,6 +2046,12 @@ class ViewerApp(App[None]):
             "Cycle alignment mode",
             show=False,
         ),
+        Binding(
+            "R,shift+r",
+            "rematch_annotations",
+            "Review stale annotations",
+            show=False,
+        ),
         Binding(".", "align_panes", "Align focused pane", show=False),
         Binding(
             "z",
@@ -1434,6 +2099,16 @@ class ViewerApp(App[None]):
         self._search_target_id: Optional[str] = None
         self._search_queries: dict[str, str] = {}
         self._search_matches: dict[str, AnnotationRange] = {}
+        self._pending_rematch_report: Optional[RematchReport] = None
+        self._pending_rematch_choices: tuple[RematchChoice, ...] = ()
+        self._pending_manual_range: Optional[AnnotationRange] = None
+        self.demo_case: Optional[DemoCase] = None
+        self._demo_case_error: Optional[str] = None
+        self._demo_reset_complete = False
+        try:
+            self.demo_case = load_demo_case(source.path)
+        except DemoCaseError as error:
+            self._demo_case_error = str(error)
         self.sync_mode = SyncMode.NORMAL
         self.annotation_store = annotation_store or AnnotationStore(source.path)
         try:
@@ -1490,6 +2165,12 @@ class ViewerApp(App[None]):
         self.query_one("#viewer", VimTextArea).focus()
         self._refresh_status()
         self.call_after_refresh(self._align_annotation_to_source)
+        if self._demo_case_error is not None:
+            self.notify(
+                self._demo_case_error,
+                severity="warning",
+                timeout=6,
+            )
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -1501,15 +2182,20 @@ class ViewerApp(App[None]):
 
     def _titlebar_text(self) -> str:
         size = self._format_size(self.source.size_bytes)
+        demo = (
+            f"  |  DEMO: {self.demo_case.name}"
+            if self.demo_case is not None
+            else ""
+        )
         return (
             f"{self.source.path}  |  {self.source.line_count} lines  |  {size}"
-            f"  |  notes: {self.annotation_store.path.name}"
+            f"  |  notes: {self.annotation_store.path.name}{demo}"
         )
 
     @staticmethod
     def _normal_help_text() -> str:
         return (
-            "Tab/Ctrl-W W panes  i edit  S sync mode  . align  "
+            "Tab/Ctrl-W W panes  i edit  R rematch  S sync mode  . align  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
             "a annotate  q quit"
@@ -1865,6 +2551,236 @@ class ViewerApp(App[None]):
         elif isinstance(target, AnnotationTextArea):
             self._align_source_to_annotation()
 
+    def action_rematch_annotations(self) -> None:
+        """Run a read-only scan and open review when stale records exist."""
+
+        if self.demo_case is not None and not self._demo_reset_complete:
+            self.push_screen(
+                DemoResetModal(self.demo_case),
+                callback=self._finish_demo_reset,
+            )
+            return
+        if self._dirty_panes():
+            self.notify(
+                "Save or discard text edits before scanning for rematches",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        report = scan_rematches(viewer.text, annotator.text)
+        if not report.items:
+            self.notify("No structured annotations to rematch", timeout=2)
+            return
+        if not report.stale_items:
+            self.notify(
+                f"All {len(report.items)} annotation(s) still match",
+                timeout=2,
+            )
+            return
+        self._pending_rematch_report = report
+        self._pending_rematch_choices = ()
+        if viewer.selected_text:
+            selection_start = location_to_offset(
+                viewer.text, viewer.selection.start
+            )
+            selection_end = location_to_offset(
+                viewer.text, viewer.selection.end
+            )
+            start, end = sorted((selection_start, selection_end))
+            self._pending_manual_range = AnnotationRange(start, end)
+        else:
+            self._pending_manual_range = None
+        self.push_screen(
+            RematchReviewModal(
+                report,
+                viewer.text,
+                self._pending_manual_range,
+            ),
+            callback=self._finish_rematch_review,
+        )
+
+    def _finish_demo_reset(self, confirmed: bool) -> None:
+        demo = self.demo_case
+        if not confirmed or demo is None:
+            self._refresh_status()
+            return
+        try:
+            saved_source, saved_annotations = reset_demo_case(
+                self._saved_source,
+                self.annotation_store,
+                demo,
+            )
+        except DemoCaseError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+
+        self.source = saved_source
+        self._saved_source = saved_source
+        self.annotation_text = saved_annotations
+        self._saved_annotation_text = saved_annotations
+        self.annotation_links = parse_annotation_links(saved_annotations)
+        self.annotation_ranges = tuple(
+            link.source_range for link in self.annotation_links
+        )
+        self._rebuild_source_line_starts()
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer.leave_edit_mode()
+        annotator.leave_edit_mode()
+        viewer.load_text(saved_source.text)
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        viewer.move_cursor((0, 0))
+        annotator.load_text(saved_annotations)
+        annotator.set_annotation_links(self.annotation_links)
+        self._set_search_match("viewer", None)
+        self._set_search_match("annotator", None)
+        self._demo_reset_complete = True
+        self._refresh_titlebar()
+        viewer.focus()
+        self._align_annotation_to_source()
+        self._refresh_status()
+        self.notify(
+            "Demo restored to its default stale case. Press R again to scan.",
+            timeout=4,
+        )
+
+    def _finish_rematch_review(
+        self, choices: Optional[tuple[RematchChoice, ...]]
+    ) -> None:
+        if choices is None:
+            self._pending_rematch_report = None
+            self._pending_rematch_choices = ()
+            self._pending_manual_range = None
+            self._refresh_status()
+            return
+        report = self._pending_rematch_report
+        if report is None:
+            return
+        self._pending_rematch_choices = choices
+        self.push_screen(
+            RematchConfirmModal(report, choices),
+            callback=self._finish_rematch_confirmation,
+        )
+
+    def _finish_rematch_confirmation(self, choice: Optional[str]) -> None:
+        report = self._pending_rematch_report
+        choices = self._pending_rematch_choices
+        if report is None:
+            return
+        if choice == "review":
+            self.push_screen(
+                RematchReviewModal(
+                    report,
+                    self.query_one("#viewer", VimTextArea).text,
+                    self._pending_manual_range,
+                    choices,
+                ),
+                callback=self._finish_rematch_review,
+            )
+            return
+        if choice != "apply":
+            self._pending_rematch_report = None
+            self._pending_rematch_choices = ()
+            self._pending_manual_range = None
+            self._refresh_status()
+            return
+        self._apply_confirmed_rematch(report, choices)
+
+    def _apply_confirmed_rematch(
+        self,
+        report: RematchReport,
+        choices: tuple[RematchChoice, ...],
+    ) -> None:
+        """Fingerprint, back up, write, validate, and refresh one approved batch."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if self._dirty_panes():
+            self.notify(
+                "Buffers changed after review; run R to scan again",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        if (
+            text_sha256(viewer.text) != report.source_sha256
+            or text_sha256(annotator.text) != report.sidecar_sha256
+        ):
+            self.notify(
+                "Documents changed after the scan; run R to recalculate",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        try:
+            disk_source = load_text_file(self.source.path)
+            disk_sidecar = self.annotation_store.read_text()
+        except (TextFileError, AnnotationFileError) as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
+        if (
+            text_sha256(disk_source.text) != report.source_sha256
+            or text_sha256(disk_sidecar) != report.sidecar_sha256
+        ):
+            self.notify(
+                "A file changed on disk after the scan; reload and run R again",
+                severity="warning",
+                timeout=5,
+            )
+            return
+
+        now = datetime.now(timezone.utc)
+        rematched_at = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        backup_label = "before-rematch-" + now.strftime("%Y%m%dT%H%M%SZ")
+        try:
+            updated = apply_rematches(
+                disk_sidecar,
+                disk_source.text,
+                choices,
+                rematched_at=rematched_at,
+            )
+            saved, backup_path = self.annotation_store.transactional_write(
+                updated,
+                backup_label=backup_label,
+                validate=lambda written: validate_applied_rematches(
+                    disk_sidecar,
+                    written,
+                    disk_source.text,
+                    choices,
+                ),
+            )
+        except (AnnotationFileError, ValueError) as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+
+        self.annotation_text = saved
+        self._saved_annotation_text = saved
+        self.annotation_links = parse_annotation_links(saved)
+        self.annotation_ranges = tuple(
+            link.source_range for link in self.annotation_links
+        )
+        annotator.load_text(saved)
+        annotator.set_annotation_links(self.annotation_links)
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        self._set_search_match("annotator", None)
+        self._pending_rematch_report = None
+        self._pending_rematch_choices = ()
+        self._pending_manual_range = None
+        if self.demo_case is not None:
+            self._demo_reset_complete = False
+        viewer.focus()
+        self._align_annotation_to_source()
+        self._refresh_status()
+        backup_message = (
+            f" Backup: {backup_path.name}." if backup_path is not None else ""
+        )
+        self.notify(
+            f"Rematched {len(choices)} annotation(s).{backup_message}",
+            timeout=5,
+        )
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         search_input = self.query_one("#search-input", SearchInput)
         viewer = self.query_one("#viewer", VimTextArea)
@@ -1883,6 +2799,7 @@ class ViewerApp(App[None]):
             "search_next",
             "search_previous",
             "cycle_sync_mode",
+            "rematch_annotations",
             "align_panes",
             "scroll_position_prefix_or_middle",
             "scroll_cursor_top",
@@ -1901,6 +2818,7 @@ class ViewerApp(App[None]):
                 return False
         if action in {
             "cycle_sync_mode",
+            "rematch_annotations",
             "align_panes",
             "scroll_position_prefix_or_middle",
             "scroll_cursor_top",
@@ -2234,7 +3152,7 @@ class ViewerApp(App[None]):
             viewer.focus()
             return
 
-        record = create_record(draft, note)
+        record = create_record(draft, note, source_text=self.source.text)
         try:
             updated = self.annotation_store.append(record)
         except AnnotationFileError as error:

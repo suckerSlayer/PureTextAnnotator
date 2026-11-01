@@ -42,6 +42,7 @@ dist/
 *.sqlite
 *.sqlite3
 /examples/*.annotations.md
+*.annotations.md.before-rematch-*
 
 # Editor and operating-system files
 .DS_Store
