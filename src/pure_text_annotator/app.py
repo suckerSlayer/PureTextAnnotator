@@ -2130,48 +2130,56 @@ class RematchConfirmModal(ModalScreen[Optional[str]]):
 
     CSS = """
     RematchConfirmModal {
-        align: center middle;
+        align: center bottom;
+        background: $background 10%;
     }
 
     #rematch-confirm-dialog {
-        width: 78%;
-        max-width: 88;
-        height: auto;
-        padding: 1 2;
+        width: 96%;
+        max-width: 120;
+        height: 10;
+        margin-bottom: 1;
+        padding: 0 1;
         border: round $warning;
         background: $panel;
     }
 
     #rematch-confirm-title {
         height: 1;
-        margin-bottom: 1;
         text-style: bold;
         color: $warning;
+        text-overflow: ellipsis;
     }
 
-    #rematch-confirm-message,
-    #rematch-confirm-safety,
-    #rematch-confirm-hint {
-        height: auto;
-        margin-bottom: 1;
+    #rematch-confirm-message {
+        height: 1fr;
+        padding: 0 1;
+        background: $surface;
     }
 
-    #rematch-confirm-safety,
     #rematch-confirm-hint {
+        height: 1;
         color: $text-muted;
+        text-overflow: ellipsis;
     }
 
     #rematch-confirm-buttons {
         height: 3;
-        align-horizontal: right;
+        grid-size: 5 1;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr;
+        grid-rows: 3;
+        grid-gutter: 0 1;
     }
 
     #rematch-confirm-buttons Button {
-        margin-left: 1;
+        width: 1fr;
+        min-width: 0;
     }
     """
 
     BINDINGS = [
+        Binding("j,down", "next_choice", "Next selected", priority=True, show=False),
+        Binding("k,up", "previous_choice", "Previous selected", priority=True, show=False),
         Binding("escape", "cancel", "Cancel", priority=True, show=False),
     ]
 
@@ -2179,12 +2187,53 @@ class RematchConfirmModal(ModalScreen[Optional[str]]):
         self,
         report: RematchReport,
         choices: tuple[RematchChoice, ...],
+        preview_callback: Optional[RematchPreviewCallback] = None,
     ) -> None:
         super().__init__()
         self.report = report
         self.choices = choices
+        self.preview_callback = preview_callback
+        self.current_index = 0
 
     def compose(self) -> ComposeResult:
+        with Vertical(id="rematch-confirm-dialog"):
+            yield Static("", markup=False, id="rematch-confirm-title")
+            yield Static("", markup=False, id="rematch-confirm-message")
+            yield Static(
+                "J/K selected change · source stays unchanged · sidecar backup "
+                "is created · Cancel is focused",
+                markup=False,
+                id="rematch-confirm-hint",
+            )
+            with Grid(id="rematch-confirm-buttons"):
+                yield Button("Cancel", id="cancel-rematch-confirm")
+                yield Button("← Selected", id="previous-rematch-choice")
+                yield Button("Selected →", id="next-rematch-choice")
+                yield Button("Review", id="review-rematch-again")
+                yield Button(
+                    "Apply",
+                    variant="warning",
+                    id="apply-rematch-confirm",
+                )
+
+    def _current_choice(self) -> Optional[RematchChoice]:
+        if not self.choices:
+            return None
+        return self.choices[self.current_index]
+
+    def _item_for_choice(
+        self, choice: RematchChoice
+    ) -> Optional[RematchItem]:
+        return next(
+            (
+                item
+                for item in self.report.items
+                if item.annotation.annotation_id == choice.annotation_id
+            ),
+            None,
+        )
+
+    def _refresh_confirmation(self) -> None:
         average, lowest = confidence_summary(self.choices)
         selected_ids = {choice.annotation_id for choice in self.choices}
         high = sum(choice.candidate.confidence >= 90 for choice in self.choices)
@@ -2212,46 +2261,50 @@ class RematchConfirmModal(ModalScreen[Optional[str]]):
             and item.annotation.annotation_id not in selected_ids
             for item in self.report.items
         )
-        with Vertical(id="rematch-confirm-dialog"):
-            yield Static(
-                "Apply annotation rematch?",
-                markup=False,
-                id="rematch-confirm-title",
+        self.query_one("#rematch-confirm-title", Static).update(
+            f"Apply rematch? · selected {self.current_index + 1}/"
+            f"{len(self.choices)} · ~{average}% average · ~{lowest}% lowest"
+        )
+        choice = self._current_choice()
+        item = None if choice is None else self._item_for_choice(choice)
+        if choice is None or item is None:
+            current_detail = "No selected rematch is available."
+        else:
+            candidate = choice.candidate
+            current_detail = (
+                f"#{item.annotation.ordinal} · {item.status.value} · "
+                f"[{candidate.source_range.start}, "
+                f"{candidate.source_range.end}) · "
+                f"~{candidate.confidence}% · {candidate.method}\n"
+                f"Current evidence: "
+                f"{'; '.join(candidate.evidence) or '(none)'}"
             )
-            yield Static(
-                f"{len(self.choices)} annotation(s) will be updated.\n"
-                f"Estimated correctness: ~{average}% average per selected annotation\n"
-                f"Lowest selected estimate: ~{lowest}%\n"
-                f"High confidence: {high}   Review accepted: {reviewed}\n"
-                f"Ambiguous skipped: {ambiguous_skipped}   Unresolved: {unresolved}\n"
-                f"Evidence: {evidence_summary}; strong saved context: "
-                f"{strong_context}",
-                markup=False,
-                id="rematch-confirm-message",
-            )
-            yield Static(
-                "This changes ranges and quoted original text in the annotation "
-                "sidecar only. The source file will not be changed. A timestamped "
-                "backup is created before the atomic, validated write.",
-                markup=False,
-                id="rematch-confirm-safety",
-            )
-            yield Static(
-                "Cancel is focused by default.",
-                markup=False,
-                id="rematch-confirm-hint",
-            )
-            with Horizontal(id="rematch-confirm-buttons"):
-                yield Button("Cancel", id="cancel-rematch-confirm")
-                yield Button("Review again", id="review-rematch-again")
-                yield Button(
-                    "Apply rematch",
-                    variant="warning",
-                    id="apply-rematch-confirm",
-                )
+            if self.preview_callback is not None:
+                self.preview_callback(item, candidate)
+        batch_detail = (
+            f"Estimated correctness: ~{average}% average · "
+            f"Lowest selected estimate: ~{lowest}% · "
+            f"Evidence: {evidence_summary} · strong context: {strong_context} · "
+            f"high: {high} · reviewed: {reviewed} · "
+            f"ambiguous skipped: {ambiguous_skipped} · unresolved: {unresolved}"
+        )
+        self.query_one("#rematch-confirm-message", Static).update(
+            current_detail + "\n" + batch_detail
+        )
 
     def on_mount(self) -> None:
+        self._refresh_confirmation()
         self.query_one("#cancel-rematch-confirm", Button).focus()
+
+    def action_next_choice(self) -> None:
+        if self.choices:
+            self.current_index = (self.current_index + 1) % len(self.choices)
+            self._refresh_confirmation()
+
+    def action_previous_choice(self) -> None:
+        if self.choices:
+            self.current_index = (self.current_index - 1) % len(self.choices)
+            self._refresh_confirmation()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -2259,6 +2312,14 @@ class RematchConfirmModal(ModalScreen[Optional[str]]):
     @on(Button.Pressed, "#cancel-rematch-confirm")
     def on_cancel_pressed(self, _event: Button.Pressed) -> None:
         self.dismiss(None)
+
+    @on(Button.Pressed, "#previous-rematch-choice")
+    def on_previous_choice_pressed(self, _event: Button.Pressed) -> None:
+        self.action_previous_choice()
+
+    @on(Button.Pressed, "#next-rematch-choice")
+    def on_next_choice_pressed(self, _event: Button.Pressed) -> None:
+        self.action_next_choice()
 
     @on(Button.Pressed, "#review-rematch-again")
     def on_review_pressed(self, _event: Button.Pressed) -> None:
@@ -3189,8 +3250,8 @@ class ViewerApp(App[None]):
     def _finish_rematch_review(
         self, choices: Optional[tuple[RematchChoice, ...]]
     ) -> None:
-        self._restore_rematch_preview()
         if choices is None:
+            self._restore_rematch_preview()
             self._pending_rematch_report = None
             self._pending_rematch_choices = ()
             self._pending_manual_range = None
@@ -3199,10 +3260,16 @@ class ViewerApp(App[None]):
             return
         report = self._pending_rematch_report
         if report is None:
+            self._restore_rematch_preview()
+            self._rematch_preview_state = None
             return
         self._pending_rematch_choices = choices
         self.push_screen(
-            RematchConfirmModal(report, choices),
+            RematchConfirmModal(
+                report,
+                choices,
+                preview_callback=self._preview_rematch_candidate,
+            ),
             callback=self._finish_rematch_confirmation,
         )
 
@@ -3224,12 +3291,14 @@ class ViewerApp(App[None]):
             )
             return
         if choice != "apply":
+            self._restore_rematch_preview()
             self._pending_rematch_report = None
             self._pending_rematch_choices = ()
             self._pending_manual_range = None
             self._rematch_preview_state = None
             self._refresh_status()
             return
+        self._restore_rematch_preview()
         self._rematch_preview_state = None
         self._apply_confirmed_rematch(report, choices)
 

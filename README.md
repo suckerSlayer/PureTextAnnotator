@@ -141,13 +141,15 @@ For a manual match, cancel review, make a Visual selection in the source pane,
 press `R`, navigate to the intended annotation, and press `M`. The selected span
 receives an estimate and follows the same confirmation path.
 
-Ctrl+S from review opens the only rematch Apply confirmation. It reports the
-average and lowest selected estimates plus ambiguous and unresolved counts.
-Cancel and Review again do not write anything. **Apply rematch** rechecks source
-and sidecar fingerprints, creates a timestamped `before-rematch` backup, updates
-only the selected sidecar ranges and quoted text, records rematch history,
-atomically writes, reparses, and rolls back on failed validation. The source file
-is never changed by rematching.
+Ctrl+S from review opens the only rematch Apply confirmation. This is another
+compact bottom panel, so both text panes remain visible and the proposed source
+span stays highlighted. Use `J`/`K` to preview every selected change. The panel
+reports each choice's method and estimate, plus the batch's average, lowest,
+ambiguous, and unresolved counts. Cancel and Review do not write anything.
+**Apply** rechecks source and sidecar fingerprints, creates a timestamped
+`before-rematch` backup, updates only the selected sidecar ranges and quoted
+text, records rematch history, atomically writes, reparses, and rolls back on
+failed validation. The source file is never changed by rematching.
 
 Estimates are transparent heuristics rather than guarantees. Short, duplicated,
 or substantially changed quotations are deliberately penalized; leaving a note

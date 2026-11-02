@@ -23,8 +23,10 @@ inspect the next/previous candidate. The compact bottom panel leaves the source
 and annotation panes visible: the source candidate is marked in green and the
 corresponding stored quotation and note are focused beside it. Only estimates
 of 90% or higher are preselected. Press Ctrl+S to continue to the final
-confirmation; Cancel still makes no changes. Applying writes only
-`cases.md.annotations.md` and creates a timestamped backup.
+confirmation. That confirmation also remains in a compact bottom panel; use
+`J`/`K` to preview each selected change in the visible panes. Cancel still makes
+no changes. Applying writes only `cases.md.annotations.md` and creates a
+timestamped backup.
 
 To try manual recovery, cancel review, make a Visual selection in the source,
 press `R`, navigate to an annotation, and press `M` to use that source span.

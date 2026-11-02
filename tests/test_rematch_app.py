@@ -55,6 +55,7 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
 
         async with app.run_test(size=(120, 34)) as pilot:
             annotator = app.query_one(AnnotationTextArea)
+            viewer = app.query_one(VimTextArea)
             assert annotator.folding_enabled is True
             assert annotator.canonical_text == before
             assert annotator.text != before
@@ -67,16 +68,25 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
             await pilot.press("ctrl+s")
             await pilot.pause()
             assert isinstance(app.screen, RematchConfirmModal)
+            confirm = app.screen
+            dialog = confirm.query_one("#rematch-confirm-dialog")
             message = app.screen.query_one(
                 "#rematch-confirm-message", Static
             ).render().plain
+            assert dialog.region.height <= 10
+            assert dialog.region.y > 0
             assert "Estimated correctness" in message
             assert "Lowest selected estimate" in message
             assert "Evidence: exact: 1" in message
+            assert viewer.rematch_candidate_range == (
+                confirm.choices[0].candidate.source_range
+            )
+            assert annotator.active_link is not None
 
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, RematchConfirmModal)
+            assert viewer.rematch_candidate_range is None
             assert store.path.read_text(encoding="utf-8") == before
             assert list(tmp_path.glob("*.before-rematch-*")) == []
 
@@ -96,6 +106,80 @@ def test_rematch_cancel_is_read_only_and_apply_creates_backup(
             backups = list(tmp_path.glob("*.before-rematch-*"))
             assert len(backups) == 1
             assert backups[0].read_text(encoding="utf-8") == before
+
+    asyncio.run(scenario())
+
+
+def test_rematch_confirmation_previews_each_selected_change(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        original = (
+            "First target remains stable.\n"
+            "Middle context.\n"
+            "Second target remains stable.\n"
+        )
+        source_path = tmp_path / "source.md"
+        source_path.write_text(original, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        for ordinal, quote in enumerate(
+            (
+                "First target remains stable.",
+                "Second target remains stable.",
+            ),
+            start=1,
+        ):
+            start = original.index(quote)
+            store.append(
+                create_record(
+                    AnnotationDraft(start, start + len(quote), quote),
+                    f"Note {ordinal}",
+                    annotation_id=f"selected-{ordinal}",
+                    created_at=f"2026-11-02T10:0{ordinal}:00Z",
+                    source_text=original,
+                )
+            )
+        source_path.write_text("Inserted preface.\n" + original, encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(100, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("shift+r", "ctrl+s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, RematchConfirmModal)
+            confirm = app.screen
+            assert len(confirm.choices) == 2
+            message_widget = confirm.query_one(
+                "#rematch-confirm-message", Static
+            )
+            first_message = message_widget.render().plain
+            assert "#1 · Shifted" in first_message
+            assert viewer.rematch_candidate_range == (
+                confirm.choices[0].candidate.source_range
+            )
+
+            await pilot.press("j")
+            await pilot.pause()
+            second_message = message_widget.render().plain
+            assert "#2 · Shifted" in second_message
+            assert first_message != second_message
+            assert viewer.rematch_candidate_range == (
+                confirm.choices[1].candidate.source_range
+            )
+
+            await pilot.press("k")
+            await pilot.pause()
+            assert "#1 · Shifted" in message_widget.render().plain
+            assert viewer.rematch_candidate_range == (
+                confirm.choices[0].candidate.source_range
+            )
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert viewer.rematch_candidate_range is None
 
     asyncio.run(scenario())
 
