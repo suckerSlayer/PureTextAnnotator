@@ -14,6 +14,8 @@ from typing import Callable, Optional, Tuple
 
 
 Location = Tuple[int, int]
+PdfRectangle = Tuple[float, float, float, float]
+PdfQuad = Tuple[float, float, float, float, float, float, float, float]
 ANNOTATION_MARKER = "<!-- pta:annotation "
 
 
@@ -54,6 +56,34 @@ class AnnotationLink:
 
 
 @dataclass(frozen=True)
+class PdfAnchorFragment:
+    """One page-local piece of a selected PDF text range."""
+
+    page_index: int
+    page_label: Optional[str]
+    page_text_sha256: str
+    text_start: int
+    text_end: int
+    crop_box: PdfRectangle
+    rotation: int
+    rect_pdf: PdfRectangle
+    quad_points_pdf: Tuple[PdfQuad, ...]
+
+
+@dataclass(frozen=True)
+class PdfAnchor:
+    """Optional geometry retained for safe PDF highlight export."""
+
+    version: int
+    document_sha256: str
+    extractor_name: str
+    extractor_version: str
+    extraction_profile: str
+    coordinate_system: str
+    fragments: Tuple[PdfAnchorFragment, ...]
+
+
+@dataclass(frozen=True)
 class AnnotationRecord:
     """One persistent note associated with a source range."""
 
@@ -69,6 +99,7 @@ class AnnotationRecord:
     suffix: Optional[str] = None
     original_start: Optional[int] = None
     original_end: Optional[int] = None
+    pdf_anchor: Optional[PdfAnchor] = None
 
 
 def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
@@ -281,6 +312,7 @@ def create_record(
     annotation_id: Optional[str] = None,
     created_at: Optional[str] = None,
     source_text: Optional[str] = None,
+    pdf_anchor: Optional[PdfAnchor] = None,
 ) -> AnnotationRecord:
     """Turn a selected range and note into a persistent record."""
 
@@ -314,6 +346,7 @@ def create_record(
         quote=draft.quote,
         note=note.rstrip(),
         created_at=timestamp,
+        pdf_anchor=pdf_anchor,
         **anchor,
     )
 
@@ -372,6 +405,54 @@ class AnnotationStore:
     def _quote_block(quote: str) -> str:
         return "\n".join(f"> {line}" if line else ">" for line in quote.split("\n"))
 
+    @staticmethod
+    def _pdf_number_list(values: Tuple[float, ...]) -> str:
+        """Render compact, deterministic YAML flow sequences."""
+
+        rounded = [round(float(value), 4) for value in values]
+        return json.dumps(rounded, ensure_ascii=False)
+
+    def _render_pdf_anchor(self, anchor: PdfAnchor) -> str:
+        lines = [
+            "pdf_anchor:",
+            f"  version: {anchor.version}",
+            f"  document_sha256: {json.dumps(anchor.document_sha256)}",
+            "  extractor:",
+            f"    name: {json.dumps(anchor.extractor_name)}",
+            f"    version: {json.dumps(anchor.extractor_version)}",
+            f"    profile: {json.dumps(anchor.extraction_profile)}",
+            f"  coordinate_system: {json.dumps(anchor.coordinate_system)}",
+            "  fragments:",
+        ]
+        for fragment in anchor.fragments:
+            lines.extend(
+                [
+                    f"    - page_index: {fragment.page_index}",
+                    "      page_label: "
+                    + (
+                        "null"
+                        if fragment.page_label is None
+                        else json.dumps(fragment.page_label, ensure_ascii=False)
+                    ),
+                    "      page_text_sha256: "
+                    + json.dumps(fragment.page_text_sha256),
+                    "      text_range:",
+                    f"        start: {fragment.text_start}",
+                    f"        end: {fragment.text_end}",
+                    "      crop_box: "
+                    + self._pdf_number_list(fragment.crop_box),
+                    f"      rotation: {fragment.rotation}",
+                    "      rect_pdf: "
+                    + self._pdf_number_list(fragment.rect_pdf),
+                    "      quad_points_pdf:",
+                ]
+            )
+            lines.extend(
+                "        - " + self._pdf_number_list(quad)
+                for quad in fragment.quad_points_pdf
+            )
+        return "\n".join(lines) + "\n"
+
     def _render_record(self, record: AnnotationRecord, ordinal: int) -> str:
         annotation_id = json.dumps(record.annotation_id, ensure_ascii=False)
         created_at = json.dumps(record.created_at, ensure_ascii=False)
@@ -394,6 +475,11 @@ class AnnotationStore:
                 f"  original_start: {record.original_start}\n"
                 f"  original_end: {record.original_end}\n"
             )
+        pdf_anchor = (
+            self._render_pdf_anchor(record.pdf_anchor)
+            if record.pdf_anchor is not None
+            else ""
+        )
         return (
             f"{self.MARKER}id={annotation_id} -->\n"
             f"## Annotation {ordinal}\n\n"
@@ -405,6 +491,7 @@ class AnnotationStore:
             f"  end: {record.end}\n"
             f"created_at: {created_at}\n"
             f"{anchor}"
+            f"{pdf_anchor}"
             "```\n\n"
             "### Original text\n\n"
             f"{quote}\n\n"

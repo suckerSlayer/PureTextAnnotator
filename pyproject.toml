@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pure-text-annotator"
-version = "0.3.0"
-description = "A keyboard-first terminal annotator for plain text and Markdown files"
+version = "0.5.0"
+description = "A keyboard-first terminal annotator for text, Markdown, and text-layer PDFs"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "pdfplumber==0.11.8",
+    "pypdf==6.21.4",
+    "PyYAML==6.0.3",
     "textual==8.2.8",
 ]
 
@@ -18,6 +21,7 @@ dev = [
 ]
 
 [project.scripts]
+pta-embed = "pure_text_annotator.embed_cli:main"
 pta-view = "pure_text_annotator.cli:main"
 
 [tool.setuptools.packages.find]

@@ -1,0 +1,120 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 391 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+(Pure Text Annotator PDF Manual Test) Tj
+0 -18 Td
+(Case 1: Basic navigation and search) Tj
+0 -18 Td
+(This PDF contains a real selectable text layer.) Tj
+0 -18 Td
+(Search target: anchor-ready phrase.) Tj
+0 -18 Td
+(Select and annotate: stable geometry anchor.) Tj
+0 -18 Td
+(Cross-line selection begins on this line) Tj
+0 -18 Td
+(and continues on this second line.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 376 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+(Case 2: Repeated text and alignment) Tj
+0 -18 Td
+(Repeated target: Shared phrase for ambiguity.) Tj
+0 -18 Td
+(A different sentence separates the repetitions.) Tj
+0 -18 Td
+(Repeated target: Shared phrase for ambiguity.) Tj
+0 -18 Td
+(Annotate either occurrence and inspect its page geometry.) Tj
+0 -18 Td
+(Search with slash and repeat with n or N.) Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 349 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+(Case 3: Page boundaries and multi-page selection) Tj
+0 -18 Td
+(Page three verifies visible page headings in the text projection.) Tj
+0 -18 Td
+(The source pane must remain read-only.) Tj
+0 -18 Td
+(BEGIN CROSS PAGE selection starts in this sentence.) Tj
+0 -18 Td
+(Continue the visual selection through the page boundary.) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 320 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+(Case 4: Multi-page selection destination) Tj
+0 -18 Td
+(END CROSS PAGE selection finishes in this sentence.) Tj
+0 -18 Td
+(A multi-page PDF annotation should store two fragments.) Tj
+0 -18 Td
+(The fragment page indexes should be 2 and 3.) Tj
+0 -18 Td
+(The original PDF must remain unchanged.) Tj
+ET
+endstream
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000140 00000 n 
+0000000210 00000 n 
+0000000336 00000 n 
+0000000778 00000 n 
+0000000904 00000 n 
+0000001331 00000 n 
+0000001457 00000 n 
+0000001857 00000 n 
+0000001985 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+2357
+%%EOF

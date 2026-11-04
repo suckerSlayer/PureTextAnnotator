@@ -1,9 +1,9 @@
 # Pure Text Annotator
 
-Pure Text Annotator is a keyboard-first terminal interface for UTF-8 text and
-Markdown files. It displays Markdown source as plain text, provides Vim-style
-navigation, selection, and guarded editing, and saves notes in a human-readable
-Markdown sidecar shown beside the source.
+Pure Text Annotator is a keyboard-first terminal interface for UTF-8 text,
+Markdown, and text-layer PDF files. It provides Vim-style navigation,
+selection, guarded text editing, and notes in a human-readable Markdown sidecar
+shown beside the source.
 
 ## Set up
 
@@ -19,6 +19,7 @@ python -m pip install -e ".[dev]"
 ```bash
 pta-view path/to/file.txt
 pta-view path/to/file.md
+pta-view path/to/paper.pdf
 ```
 
 You can also run the package directly:
@@ -28,6 +29,58 @@ python -m pure_text_annotator path/to/file.md
 ```
 
 Use `--no-wrap` to keep long lines unwrapped.
+
+## PDF support
+
+PDFs with an embedded text layer open as a deterministic plain-text projection.
+Each page starts with a visible `--- PDF page N of M ---` heading, followed by
+text in the extractor's top-to-bottom, left-to-right reading order. Search,
+Vim-style movement, selection, copy, annotation, alignment, and rematching then
+use the same interface as text and Markdown files.
+
+The PDF itself is immutable: pressing `i` in the PDF source pane shows a
+read-only warning instead of opening Edit mode. The annotation pane remains
+editable, and notes are saved beside `paper.pdf` as
+`paper.pdf.annotations.md`. A PDF with no extractable text layer is rejected
+with a clear message; OCR and a rendered page view are not part of this version.
+
+Every PDF annotation stores two complementary anchors:
+
+- The normal Unicode code-point range, quotation hash, surrounding context, and
+  source-text hash used by the current viewer and rematcher.
+- A `pdf_anchor` containing the raw PDF SHA-256, extractor version and
+  profile, zero-based page index, page-text hash, crop box, rotation, selected
+  text range, PDF-space rectangle, and standard text-markup quad points.
+
+Multi-page selections create one geometry fragment per page. Coordinates use
+PDF user space with a bottom-left origin. Geometry is valid only for the exact
+recorded PDF hash.
+
+Use `pta-embed` to write the sidecar notes as standard yellow `/Highlight`
+annotations in a separate PDF copy:
+
+```bash
+pta-embed path/to/paper.pdf
+pta-embed path/to/paper.pdf \
+  --annotations path/to/notes.md \
+  --output path/to/review-copy.pdf
+```
+
+The default input is `paper.pdf.annotations.md` and the default output is
+`paper.annotated.pdf`. Each page fragment becomes one PDF highlight carrying
+the note text, stable annotation ID, author, subject, and creation timestamp.
+Consequently, a single note that crosses two pages produces two highlights
+with the same ID and note text.
+
+Export is deliberately fail-closed. Every sidecar record must be a valid note
+with a current text anchor and `pdf_anchor`; the quotation, hashes, page data,
+range, and recomputed geometry must all match. No partial export is produced.
+The command refuses encrypted or signed PDFs, an existing output unless
+`--force` is supplied, and any request to overwrite the source PDF. `--force`
+may replace only the separate output. Existing non-conflicting PDF annotations
+are preserved, and both the source PDF and Markdown sidecar remain unchanged.
+If a PDF has been replaced or a range rematched, recreate/regenerate that
+record's PDF geometry before exporting.
 
 ## Controls
 
@@ -77,10 +130,11 @@ file.
 
 ## Edit text
 
-With the source pane focused, press `i` to request Edit mode. Because this mode
-changes the original file, a warning dialog opens every time. Type the exact
-case-sensitive text `Yes` and press Enter (or select **Edit original**) to proceed;
-any other input is rejected. Escape cancels the warning.
+With a text or Markdown source pane focused, press `i` to request Edit mode.
+Because this mode changes the original file, a warning dialog opens every time.
+Type the exact case-sensitive text `Yes` and press Enter (or select **Edit
+original**) to proceed; any other input is rejected. Escape cancels the warning.
+PDF source projections are always read-only.
 
 With the annotation pane focused, press `i` to enter Edit mode immediately; no
 warning or confirmation is shown. Changes are reparsed in memory so recorded
@@ -205,9 +259,11 @@ Normal mode restores the selected folds.
 4. Press Ctrl+S or Ctrl+Enter to save, or Escape to cancel.
 
 The right pane mirrors the complete annotation file. For a source named
-`chapter.md`, notes are saved beside it as `chapter.md.annotations.md`. Each
-entry contains a stable identifier, creation time, the original quotation, the
-note, and a zero-based half-open source range measured in Unicode code points.
+`chapter.md`, notes are saved beside it as `chapter.md.annotations.md`; for
+`paper.pdf`, the sidecar is `paper.pdf.annotations.md`. Each entry contains a
+stable identifier, creation time, the original quotation, the note, and a
+zero-based half-open source range measured in Unicode code points. PDF entries
+created by this version also include the page geometry described above.
 Recorded ranges are highlighted in yellow in the source pane when the file opens
 and immediately after a new note is saved. The currently aligned range uses the
 same blue as the focused annotation's original quotation. Moving through the
@@ -226,8 +282,10 @@ dimmed so the current note remains easy to identify.
 ## Current scope
 
 - One file per application launch
-- `.txt`, `.md`, and `.markdown` files
+- `.txt`, `.md`, `.markdown`, and text-layer `.pdf` files
 - UTF-8 input, including files with a UTF-8 byte-order mark
+- PDF source viewing, geometry-aware annotation, and safe highlight export;
+  no OCR or rendered-page pane
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving

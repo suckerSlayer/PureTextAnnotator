@@ -1,0 +1,2 @@
+# PDF fixtures contain required xref padding; always treat them as binary.
+*.pdf binary

@@ -6,10 +6,17 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Optional, Union
 
 
-SUPPORTED_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
+if TYPE_CHECKING:
+    from .pdfs import PdfDocument
+
+
+SUPPORTED_TEXT_SUFFIXES = frozenset({".txt", ".md", ".markdown"})
+SUPPORTED_SOURCE_SUFFIXES = SUPPORTED_TEXT_SUFFIXES | {".pdf"}
+# Retain the original public name for callers that mean text files specifically.
+SUPPORTED_SUFFIXES = SUPPORTED_TEXT_SUFFIXES
 PathInput = Union[str, Path]
 
 
@@ -19,12 +26,15 @@ class TextFileError(ValueError):
 
 @dataclass(frozen=True)
 class LoadedTextFile:
-    """A decoded source file and the metadata needed by the interface."""
+    """A source represented as canonical text for the interface."""
 
     path: Path
     text: str
     size_bytes: int
     line_count: int
+    source_kind: str = "text"
+    editable: bool = True
+    pdf_document: Optional["PdfDocument"] = None
 
 
 def _normalise_newlines(text: str) -> str:
@@ -45,8 +55,8 @@ def load_text_file(path_input: PathInput) -> LoadedTextFile:
         raise TextFileError(f"file does not exist: {path}")
     if not path.is_file():
         raise TextFileError(f"not a regular file: {path}")
-    if path.suffix.lower() not in SUPPORTED_SUFFIXES:
-        supported = ", ".join(sorted(SUPPORTED_SUFFIXES))
+    if path.suffix.lower() not in SUPPORTED_TEXT_SUFFIXES:
+        supported = ", ".join(sorted(SUPPORTED_TEXT_SUFFIXES))
         raise TextFileError(
             f"unsupported file type {path.suffix or '(none)'}; expected {supported}"
         )
@@ -74,8 +84,31 @@ def load_text_file(path_input: PathInput) -> LoadedTextFile:
     )
 
 
+def load_source_file(path_input: PathInput) -> LoadedTextFile:
+    """Load a supported text/Markdown file or a text-layer PDF."""
+
+    path = Path(path_input).expanduser()
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        # Keep the optional extraction dependency out of the plain-text path.
+        from .pdfs import load_pdf_file
+
+        return load_pdf_file(path)
+    if suffix in SUPPORTED_TEXT_SUFFIXES:
+        return load_text_file(path)
+    supported = ", ".join(sorted(SUPPORTED_SOURCE_SUFFIXES))
+    raise TextFileError(
+        f"unsupported file type {path.suffix or '(none)'}; expected {supported}"
+    )
+
+
 def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
     """Atomically save edited text while preserving basic file formatting."""
+
+    if not source.editable or source.source_kind != "text":
+        raise TextFileError(
+            "PDF source text is an extracted read-only view and cannot be saved"
+        )
 
     path = source.path
     temporary_path = None

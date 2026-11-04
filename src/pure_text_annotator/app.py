@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Callable, Iterable, Optional
@@ -27,6 +27,7 @@ from .annotations import (
     AnnotationLink,
     AnnotationRange,
     AnnotationStore,
+    PdfAnchor,
     create_record,
     draft_from_selection,
     location_to_offset,
@@ -34,7 +35,7 @@ from .annotations import (
 )
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
 from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
-from .files import LoadedTextFile, TextFileError, load_text_file, save_text_file
+from .files import LoadedTextFile, TextFileError, load_source_file, save_text_file
 from .rematch import (
     RematchCandidate,
     RematchChoice,
@@ -2606,7 +2607,11 @@ class ViewerApp(App[None]):
                 annotation_ranges=self.annotation_ranges,
                 id="viewer",
             )
-            viewer.border_title = "Source"
+            viewer.border_title = (
+                "Extracted PDF text"
+                if self.source.source_kind == "pdf"
+                else "Source"
+            )
             yield viewer
             annotator = AnnotationTextArea(
                 self.annotation_text,
@@ -2649,6 +2654,11 @@ class ViewerApp(App[None]):
 
     def _titlebar_text(self) -> str:
         size = self._format_size(self.source.size_bytes)
+        pages = (
+            f"  |  {self.source.pdf_document.page_count} PDF pages"
+            if self.source.pdf_document is not None
+            else ""
+        )
         demo = (
             f"  |  DEMO: {self.demo_case.name}"
             if self.demo_case is not None
@@ -2656,13 +2666,13 @@ class ViewerApp(App[None]):
         )
         return (
             f"{self.source.path}  |  {self.source.line_count} lines  |  {size}"
-            f"  |  notes: {self.annotation_store.path.name}{demo}"
+            f"{pages}  |  notes: {self.annotation_store.path.name}{demo}"
         )
 
-    @staticmethod
-    def _normal_help_text() -> str:
+    def _normal_help_text(self) -> str:
+        edit_hint = "i edit" if self.source.editable else "PDF source read-only"
         return (
-            "Tab/Ctrl-W W panes  i edit  Ctrl-S save  R rematch  "
+            f"Tab/Ctrl-W W panes  {edit_hint}  Ctrl-S save  R rematch  "
             "S sync  . align  zi/zo/zc folds  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
@@ -3329,7 +3339,7 @@ class ViewerApp(App[None]):
             )
             return
         try:
-            disk_source = load_text_file(self.source.path)
+            disk_source = load_source_file(self.source.path)
             disk_sidecar = self.annotation_store.read_text()
         except (TextFileError, AnnotationFileError) as error:
             self.notify(str(error), severity="error", timeout=5)
@@ -3643,6 +3653,14 @@ class ViewerApp(App[None]):
         viewer = self.query_one("#viewer", VimTextArea)
         if not viewer.has_focus or viewer.edit_mode:
             return
+        if not self.source.editable:
+            self.notify(
+                "PDF source text is an extracted read-only view; edit the "
+                "annotation pane instead",
+                severity="warning",
+                timeout=4,
+            )
+            return
         if self._pane_switch_pending:
             self._clear_pane_switch_prefix()
         if self._scroll_position_pending:
@@ -3671,8 +3689,8 @@ class ViewerApp(App[None]):
             return
         viewer._normal_history_pending = False
         text = viewer.text
-        self.source = LoadedTextFile(
-            path=self.source.path,
+        self.source = replace(
+            self.source,
             text=text,
             size_bytes=len(text.encode("utf-8")),
             line_count=0 if not text else text.count("\n") + 1,
@@ -3820,23 +3838,50 @@ class ViewerApp(App[None]):
                 event.selection.end,
             )
         except ValueError:
-            self.notify("Select source text before annotating", severity="warning", timeout=2)
+            self.notify(
+                "Select source text before annotating",
+                severity="warning",
+                timeout=2,
+            )
             return
+
+        pdf_anchor: Optional[PdfAnchor] = None
+        if self.source.pdf_document is not None:
+            pdf_anchor = self.source.pdf_document.anchor_for_range(
+                draft.start, draft.end
+            )
+            if pdf_anchor is None:
+                self.notify(
+                    "Select extracted PDF text, not only a page heading or spacing",
+                    severity="warning",
+                    timeout=3,
+                )
+                return
 
         self.push_screen(
             NoteModal(draft),
-            callback=lambda note: self._finish_annotation(draft, note),
+            callback=lambda note: self._finish_annotation(
+                draft, note, pdf_anchor
+            ),
         )
 
     def _finish_annotation(
-        self, draft: AnnotationDraft, note: Optional[str]
+        self,
+        draft: AnnotationDraft,
+        note: Optional[str],
+        pdf_anchor: Optional[PdfAnchor] = None,
     ) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         if note is None:
             viewer.focus()
             return
 
-        record = create_record(draft, note, source_text=self.source.text)
+        record = create_record(
+            draft,
+            note,
+            source_text=self.source.text,
+            pdf_anchor=pdf_anchor,
+        )
         try:
             updated = self.annotation_store.append(record)
         except AnnotationFileError as error:
