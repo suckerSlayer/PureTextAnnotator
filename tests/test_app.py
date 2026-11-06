@@ -92,6 +92,9 @@ def test_source_edit_mode_requires_literal_capital_yes(tmp_path: Path) -> None:
             await pilot.press("i")
             await pilot.pause()
             assert isinstance(app.screen, EditWarningModal)
+            dialog = app.screen.query_one("#edit-warning-dialog")
+            assert dialog.region.height <= 12
+            assert dialog.region.y > viewer.region.y
             assert viewer.read_only is True
             assert viewer.edit_mode is False
 

@@ -205,10 +205,11 @@ file.
 ## Edit text
 
 With a text or Markdown source pane focused, press `i` to request Edit mode.
-Because this mode changes the original file, a warning dialog opens every time.
-Type the exact case-sensitive text `Yes` and press Enter (or select **Edit
-original**) to proceed; any other input is rejected. Escape cancels the warning.
-PDF source projections are always read-only.
+Because this mode changes the original file, a compact warning panel opens at
+the bottom while both text panes remain visible. Type the exact case-sensitive
+text `Yes` and press Enter (or select **Edit original**) to proceed; any other
+input is rejected. Escape cancels the warning. PDF source projections are
+always read-only.
 
 With the annotation pane focused, press `i` to enter Edit mode immediately; no
 warning or confirmation is shown. Changes are reparsed in memory so recorded

@@ -1447,30 +1447,32 @@ class EditWarningModal(ModalScreen[bool]):
 
     CSS = """
     EditWarningModal {
-        align: center middle;
+        align: center bottom;
+        background: $background 10%;
     }
 
     #edit-warning-dialog {
-        width: 72%;
-        max-width: 78;
-        height: auto;
-        padding: 1 2;
+        width: 96%;
+        max-width: 120;
+        height: 12;
+        margin-bottom: 1;
+        padding: 0 1;
         border: round $warning;
         background: $panel;
     }
 
     #edit-warning-title {
         height: 1;
-        margin-bottom: 1;
         text-style: bold;
         color: $warning;
+        text-overflow: ellipsis;
     }
 
     #edit-warning-message,
     #edit-warning-path,
     #edit-warning-annotations {
-        height: auto;
-        margin-bottom: 1;
+        height: 1;
+        text-overflow: ellipsis;
     }
 
     #edit-warning-path,
@@ -1480,7 +1482,6 @@ class EditWarningModal(ModalScreen[bool]):
 
     #edit-confirmation {
         height: 3;
-        margin-bottom: 1;
         border: solid $warning;
     }
 
