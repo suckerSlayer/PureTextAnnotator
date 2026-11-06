@@ -11,8 +11,11 @@ from pure_text_annotator.annotations import (
     create_record,
 )
 from pure_text_annotator.app import (
+    AnnotationMenuModal,
     AnnotationTextArea,
+    DeleteAnnotationModal,
     EditWarningModal,
+    KeybindingsModal,
     NoteModal,
     QuitChangesModal,
     SearchInput,
@@ -305,10 +308,10 @@ def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
             )
 
             await pilot.press(
-                "q", "w", "i", "z", "o", "c", "t", "b", "u"
+                "q", "w", "i", "z", "o", "c", "t", "b", "u", "m"
             )
             await pilot.pause()
-            assert annotator.text.endswith("qwizoctbu")
+            assert annotator.text.endswith("qwizoctbum")
             assert not app.annotation_store.path.exists()
 
             await pilot.press("ctrl+w", "x", "ctrl+h", "n", "o", "t", "e")
@@ -908,6 +911,129 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert viewer.cursor_location == (3, 0)
             assert annotator.active_link == app.annotation_links[1]
             assert viewer.active_annotation_range == second_link.source_range
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_n_and_ctrl_p_navigate_annotations_from_both_panes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_text = "zero\none\ntwo\nthree"
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, 4, "zero"),
+                "First note",
+                annotation_id="first",
+            )
+        )
+        store.append(
+            create_record(
+                AnnotationDraft(13, 18, "three"),
+                "Second note",
+                annotation_id="second",
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            first_link, second_link = app.annotation_links
+            await pilot.pause()
+
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+            assert viewer.active_annotation_range == second_link.source_range
+            assert annotator.active_link == second_link
+
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+            assert viewer.active_annotation_range == first_link.source_range
+            assert annotator.active_link == first_link
+
+            app.sync_mode = SyncMode.SYNC
+            annotator.focus()
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert annotator.active_link == second_link
+            assert annotator._full_cursor_location()[0] == (
+                second_link.sidecar_note_line
+            )
+            assert viewer.cursor_location == (3, 0)
+
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert annotator.active_link == first_link
+            assert viewer.cursor_location == (0, 0)
+
+    asyncio.run(scenario())
+
+
+def test_annotation_menu_shows_help_and_deletes_current_annotation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("zero one two", encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, 4, "zero"),
+                "First note",
+                annotation_id="first",
+            )
+        )
+        store.append(
+            create_record(
+                AnnotationDraft(9, 12, "two"),
+                "Second note",
+                annotation_id="second",
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            app.query_one(AnnotationTextArea).focus()
+            await pilot.press("m")
+            await pilot.pause()
+            assert isinstance(app.screen, AnnotationMenuModal)
+            menu_dialog = app.screen.query_one("#annotation-menu-dialog")
+            assert menu_dialog.region.height <= 13
+            assert menu_dialog.region.y > app.query_one(VimTextArea).region.y
+            assert "Annotation 1" in app.screen.query_one(
+                "#annotation-menu-current", Static
+            ).render().plain
+            assert app.screen.query_one("#menu-embed-pdf").disabled is True
+
+            await pilot.press("k")
+            await pilot.pause()
+            assert isinstance(app.screen, KeybindingsModal)
+            assert "Ctrl-N / Ctrl-P" in app.screen.query_one(
+                "#keybindings-text", TextArea
+            ).text
+            await pilot.press("escape", "m", "d")
+            await pilot.pause()
+            assert isinstance(app.screen, DeleteAnnotationModal)
+
+            await pilot.press("d")
+            await pilot.pause()
+            saved = store.path.read_text(encoding="utf-8")
+            assert 'id: "first"' not in saved
+            assert 'id: "second"' in saved
+            assert "## Annotation 1" in saved
+            assert "## Annotation 2" not in saved
+            assert len(app.annotation_links) == 1
+            assert app.annotation_links[0].source_range == AnnotationRange(9, 12)
 
     asyncio.run(scenario())
 

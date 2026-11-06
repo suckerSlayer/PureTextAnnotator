@@ -29,6 +29,7 @@ from .annotations import (
     AnnotationStore,
     PdfAnchor,
     create_record,
+    delete_annotation_block,
     draft_from_selection,
     location_to_offset,
     parse_annotation_links,
@@ -56,6 +57,41 @@ SourceWriter = Callable[[LoadedTextFile, str], LoadedTextFile]
 RematchPreviewCallback = Callable[
     [RematchItem, Optional[RematchCandidate]], None
 ]
+
+
+KEYBINDING_REFERENCE = """PURE TEXT ANNOTATOR KEYBINDINGS
+
+Movement
+  h/j/k/l or arrows       move cursor
+  w / b / e               next word / previous word / word end
+  0 / $                   line start / line end
+  g / G                   document start / document end
+  Ctrl-F / Ctrl-B         page down / page up
+  Ctrl-E / Ctrl-Y         scroll down / up one line
+  zt / zz / zb            place cursor at top / middle / bottom
+
+Annotations
+  Ctrl-N / Ctrl-P         next / previous annotation
+  v                       visual selection in source
+  a                       annotate selected source text
+  m                       annotation action menu
+  R                       review stale annotation rematches
+  .                       align and center both panes manually
+  S                       cycle Normal / Sync / Off alignment
+  zi / zo / zc            toggle / open / close metadata folds
+
+Search, editing, and files
+  /                       search focused pane
+  n / N                   next / previous search result
+  i                       enter Edit mode
+  Esc or Ctrl-[           leave Edit mode or clear selection
+  u / Ctrl-R              undo / redo
+  Ctrl-W / Ctrl-H         delete previous word / character in Edit mode
+  Ctrl-S                  save changes
+  y or Ctrl-C / Cmd-C     copy selection
+  Tab or Ctrl-W w         switch panes
+  q or Ctrl-Q             quit
+"""
 
 
 class SyncMode(str, Enum):
@@ -1681,6 +1717,328 @@ class QuitChangesModal(ModalScreen[Optional[str]]):
         self.action_cancel()
 
 
+class AnnotationMenuModal(ModalScreen[Optional[str]]):
+    """Offer annotation operations without hiding the two text panes."""
+
+    CSS = """
+    AnnotationMenuModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #annotation-menu-dialog {
+        width: 96%;
+        max-width: 120;
+        height: 13;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #annotation-menu-title {
+        height: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #annotation-menu-current,
+    #annotation-menu-hint {
+        height: 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+
+    #annotation-menu-buttons {
+        height: 7;
+        grid-size: 2 2;
+        grid-columns: 1fr 1fr;
+        grid-rows: 3 3;
+        grid-gutter: 1 1;
+        margin-top: 1;
+    }
+
+    #annotation-menu-buttons Button {
+        width: 1fr;
+        min-width: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("d", "delete", "Delete current", priority=True, show=False),
+        Binding("r", "rematch", "Rematch", priority=True, show=False),
+        Binding("k", "keybindings", "Keybindings", priority=True, show=False),
+        Binding("e", "embed", "Embed PDF", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        current_label: Optional[str],
+        *,
+        is_pdf: bool,
+    ) -> None:
+        super().__init__()
+        self.current_label = current_label
+        self.is_pdf = is_pdf
+
+    def compose(self) -> ComposeResult:
+        current = self.current_label or "No valid current annotation"
+        with Vertical(id="annotation-menu-dialog"):
+            yield Static(
+                "Annotation actions",
+                markup=False,
+                id="annotation-menu-title",
+            )
+            yield Static(
+                current,
+                markup=False,
+                id="annotation-menu-current",
+            )
+            with Grid(id="annotation-menu-buttons"):
+                yield Button(
+                    "D  Delete current annotation",
+                    id="menu-delete-annotation",
+                    disabled=self.current_label is None,
+                )
+                yield Button(
+                    "R  Rematch annotations",
+                    id="menu-rematch-annotations",
+                )
+                yield Button(
+                    "K  Show keybindings",
+                    id="menu-show-keybindings",
+                )
+                yield Button(
+                    "E  Embed annotations into PDF copy",
+                    id="menu-embed-pdf",
+                    disabled=not self.is_pdf,
+                )
+            yield Static(
+                "D/R/K/E chooses · Escape cancels · original PDFs are never "
+                "overwritten",
+                markup=False,
+                id="annotation-menu-hint",
+            )
+
+    def on_mount(self) -> None:
+        button_id = (
+            "#menu-delete-annotation"
+            if self.current_label is not None
+            else "#menu-rematch-annotations"
+        )
+        self.query_one(button_id, Button).focus()
+
+    def action_delete(self) -> None:
+        if self.current_label is not None:
+            self.dismiss("delete")
+
+    def action_rematch(self) -> None:
+        self.dismiss("rematch")
+
+    def action_keybindings(self) -> None:
+        self.dismiss("keybindings")
+
+    def action_embed(self) -> None:
+        if self.is_pdf:
+            self.dismiss("embed")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#menu-delete-annotation")
+    def on_delete_pressed(self, _event: Button.Pressed) -> None:
+        self.action_delete()
+
+    @on(Button.Pressed, "#menu-rematch-annotations")
+    def on_rematch_pressed(self, _event: Button.Pressed) -> None:
+        self.action_rematch()
+
+    @on(Button.Pressed, "#menu-show-keybindings")
+    def on_keybindings_pressed(self, _event: Button.Pressed) -> None:
+        self.action_keybindings()
+
+    @on(Button.Pressed, "#menu-embed-pdf")
+    def on_embed_pressed(self, _event: Button.Pressed) -> None:
+        self.action_embed()
+
+
+class DeleteAnnotationModal(ModalScreen[bool]):
+    """Confirm one structured annotation deletion."""
+
+    CSS = """
+    DeleteAnnotationModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #delete-annotation-dialog {
+        width: 96%;
+        max-width: 120;
+        height: 10;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $error;
+        background: $panel;
+    }
+
+    #delete-annotation-title {
+        height: 1;
+        text-style: bold;
+        color: $error;
+    }
+
+    #delete-annotation-label,
+    #delete-annotation-preview,
+    #delete-annotation-hint {
+        height: 1;
+        text-overflow: ellipsis;
+    }
+
+    #delete-annotation-preview,
+    #delete-annotation-hint {
+        color: $text-muted;
+    }
+
+    #delete-annotation-buttons {
+        height: 3;
+        align-horizontal: right;
+        margin-top: 1;
+    }
+
+    #delete-annotation-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("d", "confirm", "Delete", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(self, label: str, quote_preview: str) -> None:
+        super().__init__()
+        self.label = label
+        self.quote_preview = quote_preview
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-annotation-dialog"):
+            yield Static(
+                "Delete current annotation?",
+                markup=False,
+                id="delete-annotation-title",
+            )
+            yield Static(
+                self.label,
+                markup=False,
+                id="delete-annotation-label",
+            )
+            yield Static(
+                self.quote_preview,
+                markup=False,
+                id="delete-annotation-preview",
+            )
+            yield Static(
+                "The source text is unchanged · D confirms · Escape cancels",
+                markup=False,
+                id="delete-annotation-hint",
+            )
+            with Horizontal(id="delete-annotation-buttons"):
+                yield Button("Cancel", id="cancel-delete-annotation")
+                yield Button(
+                    "Delete annotation",
+                    variant="error",
+                    id="confirm-delete-annotation",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-delete-annotation", Button).focus()
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-delete-annotation")
+    def on_confirm_pressed(self, _event: Button.Pressed) -> None:
+        self.action_confirm()
+
+    @on(Button.Pressed, "#cancel-delete-annotation")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
+class KeybindingsModal(ModalScreen[None]):
+    """Display a scrollable reference for the application's keybindings."""
+
+    CSS = """
+    KeybindingsModal {
+        align: center middle;
+        background: $background 15%;
+    }
+
+    #keybindings-dialog {
+        width: 88%;
+        max-width: 92;
+        height: 88%;
+        max-height: 34;
+        padding: 1 2;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #keybindings-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #keybindings-text {
+        height: 1fr;
+        border: solid $primary;
+    }
+
+    #keybindings-hint {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("q,escape", "close", "Close", priority=True, show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="keybindings-dialog"):
+            yield Static(
+                "Keybinding reference",
+                markup=False,
+                id="keybindings-title",
+            )
+            yield TextArea(
+                KEYBINDING_REFERENCE,
+                read_only=True,
+                show_cursor=False,
+                show_line_numbers=False,
+                soft_wrap=False,
+                id="keybindings-text",
+            )
+            yield Static(
+                "Arrow/Page keys scroll · Q or Escape closes",
+                markup=False,
+                id="keybindings-hint",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#keybindings-text", TextArea).focus()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class DemoResetModal(ModalScreen[bool]):
     """Warn before restoring a marked rematch demonstration baseline."""
 
@@ -2521,6 +2879,27 @@ class ViewerApp(App[None]):
             show=False,
         ),
         Binding(
+            "ctrl+n",
+            "next_annotation",
+            "Next annotation",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "ctrl+p",
+            "previous_annotation",
+            "Previous annotation",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "m",
+            "open_annotation_menu",
+            "Annotation actions",
+            show=False,
+            priority=True,
+        ),
+        Binding(
             "S,shift+s",
             "cycle_sync_mode",
             "Cycle alignment mode",
@@ -2610,6 +2989,8 @@ class ViewerApp(App[None]):
         self._pending_rematch_choices: tuple[RematchChoice, ...] = ()
         self._pending_manual_range: Optional[AnnotationRange] = None
         self._rematch_preview_state: Optional[RematchPreviewState] = None
+        self._pending_menu_link: Optional[AnnotationLink] = None
+        self._menu_focus_pane = "viewer"
         self._suspend_alignment = False
         self.demo_case: Optional[DemoCase] = None
         self._demo_case_error: Optional[str] = None
@@ -2720,7 +3101,7 @@ class ViewerApp(App[None]):
         edit_hint = "i edit" if self.source.editable else "PDF source read-only"
         return (
             f"Tab/Ctrl-W W panes  {edit_hint}  Ctrl-S save  R rematch  "
-            "S sync  . align  zi/zo/zc folds  "
+            "Ctrl-N/P notes  m menu  S sync  . align  zi/zo/zc folds  "
             "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
             "a annotate  q quit"
@@ -2756,6 +3137,349 @@ class ViewerApp(App[None]):
             <= link.source_range.start
             < link.source_range.end
             <= source_length
+        )
+
+    def _current_annotation_link(self) -> Optional[AnnotationLink]:
+        """Return the annotation addressed by the focused pane's cursor."""
+
+        target = self._focused_search_target()
+        if isinstance(target, VimTextArea):
+            offset = location_to_offset(target.text, target.cursor_location)
+            return self._link_for_source_offset(offset)
+        if isinstance(target, AnnotationTextArea):
+            full_line = target.full_line_for_display(target.cursor_location[0])
+            return self._link_for_sidecar_line(full_line)
+        return None
+
+    def _annotation_label(self, link: AnnotationLink) -> str:
+        try:
+            ordinal = self.annotation_links.index(link) + 1
+        except ValueError:
+            ordinal = 0
+        source_range = link.source_range
+        prefix = f"Annotation {ordinal}" if ordinal else "Annotation"
+        return f"{prefix} · source [{source_range.start}, {source_range.end})"
+
+    def _navigate_annotation(self, direction: int) -> None:
+        """Move to the next or previous annotation in the focused pane."""
+
+        links = self._valid_annotation_links()
+        if not links:
+            self.notify("No valid annotations to navigate", timeout=1.75)
+            return
+
+        target = self._focused_search_target()
+        if isinstance(target, VimTextArea):
+            ordered = tuple(
+                sorted(
+                    links,
+                    key=lambda link: (
+                        link.source_range.start,
+                        link.source_range.end,
+                        link.sidecar_start_line,
+                    ),
+                )
+            )
+            offset = location_to_offset(target.text, target.cursor_location)
+            containing = tuple(
+                link
+                for link in ordered
+                if link.source_range.start <= offset < link.source_range.end
+            )
+            active = self.query_one(
+                "#annotator", AnnotationTextArea
+            ).active_link
+            current = active if active in containing else (
+                containing[0] if containing else None
+            )
+            if current is not None:
+                current_index = ordered.index(current)
+                target_index = (current_index + direction) % len(ordered)
+                wrapped = (
+                    direction > 0 and target_index <= current_index
+                    or direction < 0 and target_index >= current_index
+                )
+                destination = ordered[target_index]
+            else:
+                candidates = (
+                    tuple(
+                        link
+                        for link in ordered
+                        if link.source_range.start >= offset
+                    )
+                    if direction > 0
+                    else tuple(
+                        link
+                        for link in ordered
+                        if link.source_range.start < offset
+                    )
+                )
+                if candidates:
+                    destination = candidates[0] if direction > 0 else candidates[-1]
+                    wrapped = False
+                else:
+                    destination = ordered[0] if direction > 0 else ordered[-1]
+                    wrapped = True
+
+            if target.visual_mode:
+                target.action_cancel_visual()
+            target.move_cursor(
+                self._source_location_for_offset(
+                    destination.source_range.start
+                ),
+                center=True,
+            )
+            target.set_active_annotation_range(destination.source_range)
+            if self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}:
+                self.query_one("#annotator", AnnotationTextArea).show_link(
+                    destination,
+                    move_cursor=True,
+                )
+        elif isinstance(target, AnnotationTextArea):
+            ordered = tuple(sorted(links, key=lambda link: link.sidecar_start_line))
+            full_line = target.full_line_for_display(target.cursor_location[0])
+            current = next(
+                (
+                    link
+                    for link in ordered
+                    if link.sidecar_start_line
+                    <= full_line
+                    <= link.sidecar_end_line
+                ),
+                None,
+            )
+            if current is not None:
+                current_index = ordered.index(current)
+                target_index = (current_index + direction) % len(ordered)
+                wrapped = (
+                    direction > 0 and target_index <= current_index
+                    or direction < 0 and target_index >= current_index
+                )
+                destination = ordered[target_index]
+            else:
+                candidates = (
+                    tuple(
+                        link
+                        for link in ordered
+                        if link.sidecar_start_line > full_line
+                    )
+                    if direction > 0
+                    else tuple(
+                        link
+                        for link in ordered
+                        if link.sidecar_start_line < full_line
+                    )
+                )
+                if candidates:
+                    destination = candidates[0] if direction > 0 else candidates[-1]
+                    wrapped = False
+                else:
+                    destination = ordered[0] if direction > 0 else ordered[-1]
+                    wrapped = True
+
+            target.show_link(destination, move_cursor=True)
+            if self.sync_mode is SyncMode.SYNC:
+                viewer = self.query_one("#viewer", VimTextArea)
+                viewer.set_active_annotation_range(destination.source_range)
+                viewer.move_cursor(
+                    self._source_location_for_offset(
+                        destination.source_range.start
+                    ),
+                    center=True,
+                )
+        else:
+            return
+
+        self._refresh_status()
+        if wrapped:
+            boundary = "first" if direction > 0 else "last"
+            self.notify(f"Wrapped to {boundary} annotation", timeout=1.25)
+
+    def action_next_annotation(self) -> None:
+        self._navigate_annotation(1)
+
+    def action_previous_annotation(self) -> None:
+        self._navigate_annotation(-1)
+
+    def action_open_annotation_menu(self) -> None:
+        """Open the compact annotation action menu for the focused pane."""
+
+        if self._pane_switch_pending:
+            self._clear_pane_switch_prefix()
+        if self._scroll_position_pending:
+            self._clear_scroll_position_prefix()
+        focused = self._focused_search_target()
+        self._menu_focus_pane = (
+            "annotator" if isinstance(focused, AnnotationTextArea) else "viewer"
+        )
+        self._pending_menu_link = self._current_annotation_link()
+        current_label = (
+            self._annotation_label(self._pending_menu_link)
+            if self._pending_menu_link is not None
+            else None
+        )
+        self.push_screen(
+            AnnotationMenuModal(
+                current_label,
+                is_pdf=self.source.source_kind == "pdf",
+            ),
+            callback=self._finish_annotation_menu,
+        )
+
+    def _finish_annotation_menu(self, choice: Optional[str]) -> None:
+        link = self._pending_menu_link
+        if choice == "delete":
+            if self._dirty_panes():
+                self._pending_menu_link = None
+                self.notify(
+                    "Save or discard text edits before deleting an annotation",
+                    severity="warning",
+                    timeout=3,
+                )
+                return
+            if link is None or link not in self.annotation_links:
+                self._pending_menu_link = None
+                self.notify(
+                    "The current annotation is no longer available",
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+            quote = self.query_one("#viewer", VimTextArea).text[
+                link.source_range.start : link.source_range.end
+            ]
+            quote_preview = " ".join(quote.split())
+            if len(quote_preview) > 100:
+                quote_preview = quote_preview[:99] + "…"
+            self.push_screen(
+                DeleteAnnotationModal(
+                    self._annotation_label(link),
+                    quote_preview or "(empty source quotation)",
+                ),
+                callback=self._finish_delete_annotation,
+            )
+            return
+
+        self._pending_menu_link = None
+        if choice == "rematch":
+            self.action_rematch_annotations()
+        elif choice == "keybindings":
+            self.push_screen(KeybindingsModal())
+        elif choice == "embed":
+            self._embed_pdf_annotations_from_menu()
+        else:
+            self._refresh_status()
+
+    def _finish_delete_annotation(self, confirmed: bool) -> None:
+        link = self._pending_menu_link
+        self._pending_menu_link = None
+        if not confirmed or link is None:
+            self._refresh_status()
+            return
+        if self._dirty_panes() or link not in self.annotation_links:
+            self.notify(
+                "Documents changed before deletion; reopen the menu",
+                severity="warning",
+                timeout=3,
+            )
+            return
+
+        old_links = self.annotation_links
+        old_index = old_links.index(link)
+        deleted_label = self._annotation_label(link)
+        try:
+            updated = delete_annotation_block(
+                self.query_one("#annotator", AnnotationTextArea).canonical_text,
+                link,
+            )
+            saved = self.annotation_store.write(updated)
+        except (AnnotationFileError, ValueError) as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
+
+        self.annotation_text = saved
+        self._saved_annotation_text = saved
+        self.annotation_links = parse_annotation_links(saved)
+        self.annotation_ranges = tuple(
+            annotation_link.source_range
+            for annotation_link in self.annotation_links
+        )
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator.load_annotation_text(saved)
+        annotator.set_annotation_links(self.annotation_links)
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        self._set_search_match("annotator", None)
+
+        if self.annotation_links:
+            destination = self.annotation_links[
+                min(old_index, len(self.annotation_links) - 1)
+            ]
+            annotator.show_link(destination, move_cursor=True)
+            if self._menu_focus_pane == "viewer":
+                viewer.set_active_annotation_range(destination.source_range)
+                viewer.move_cursor(
+                    self._source_location_for_offset(
+                        destination.source_range.start
+                    ),
+                    center=True,
+                )
+                viewer.focus()
+            else:
+                annotator.focus()
+                if self.sync_mode is SyncMode.SYNC:
+                    viewer.set_active_annotation_range(
+                        destination.source_range
+                    )
+                    viewer.move_cursor(
+                        self._source_location_for_offset(
+                            destination.source_range.start
+                        ),
+                        center=True,
+                    )
+        else:
+            annotator.clear_active_link()
+            viewer.set_active_annotation_range(None)
+            (
+                annotator.focus()
+                if self._menu_focus_pane == "annotator"
+                else viewer.focus()
+            )
+
+        self._refresh_status()
+        self._refresh_pdf_copy_after_annotation_save()
+        self.notify(
+            f"Deleted {deleted_label}",
+            timeout=2.5,
+        )
+
+    def _embed_pdf_annotations_from_menu(self) -> None:
+        """Manually refresh the derived annotated PDF from saved records."""
+
+        if self.source.source_kind != "pdf":
+            self.notify(
+                "PDF embedding is available only for PDF sources",
+                severity="warning",
+                timeout=2.5,
+            )
+            return
+        if self._dirty_panes():
+            self.notify(
+                "Save or discard text edits before embedding annotations",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        if not self.annotation_store.path.exists():
+            self.notify(
+                "No saved annotation file to embed",
+                severity="warning",
+                timeout=2.5,
+            )
+            return
+        self._refresh_pdf_copy_after_annotation_save(
+            source=self._saved_source,
+            manual=True,
         )
 
     def _link_for_source_offset(self, offset: int) -> Optional[AnnotationLink]:
@@ -3479,6 +4203,9 @@ class ViewerApp(App[None]):
             "start_search",
             "search_next",
             "search_previous",
+            "next_annotation",
+            "previous_annotation",
+            "open_annotation_menu",
             "cycle_sync_mode",
             "rematch_annotations",
             "align_panes",
@@ -3499,6 +4226,9 @@ class ViewerApp(App[None]):
             "start_search",
             "search_next",
             "search_previous",
+            "next_annotation",
+            "previous_annotation",
+            "open_annotation_menu",
         }:
             if modal_open or search_input.has_focus:
                 return False
@@ -3578,15 +4308,23 @@ class ViewerApp(App[None]):
         self.exit()
 
     def _refresh_pdf_copy_after_annotation_save(
-        self, *, source: Optional[LoadedTextFile] = None
+        self,
+        *,
+        source: Optional[LoadedTextFile] = None,
+        manual: bool = False,
     ) -> None:
-        """Refresh the derived PDF copy immediately after sidecar persistence."""
+        """Refresh the derived PDF copy after saving or an explicit menu action."""
 
         current_source = self.source if source is None else source
-        if (
-            not self.embed_on_annotation_save
-            or current_source.source_kind != "pdf"
-        ):
+        if current_source.source_kind != "pdf":
+            if manual:
+                self.notify(
+                    "PDF embedding is available only for PDF sources",
+                    severity="warning",
+                    timeout=2.5,
+                )
+            return
+        if not manual and not self.embed_on_annotation_save:
             return
 
         from .embed import (
@@ -3616,9 +4354,14 @@ class ViewerApp(App[None]):
                 loaded_source=current_source,
             )
         except PdfEmbedError as error:
+            message = (
+                f"Could not refresh annotated PDF: {error}"
+                if manual
+                else "Annotations were saved, but the annotated PDF could not "
+                f"be refreshed: {error}"
+            )
             self.notify(
-                "Annotations were saved, but the annotated PDF could not be "
-                f"refreshed: {error}",
+                message,
                 severity="error",
                 timeout=6,
             )

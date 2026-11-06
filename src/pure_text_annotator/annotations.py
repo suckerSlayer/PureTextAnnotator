@@ -329,6 +329,58 @@ def parse_annotation_ranges(annotation_text: str) -> Tuple[AnnotationRange, ...]
     )
 
 
+def delete_annotation_block(
+    annotation_text: str, link: AnnotationLink
+) -> str:
+    """Remove one parsed annotation block and renumber remaining headings.
+
+    The link comes from :func:`parse_annotation_links`, so its line boundaries
+    identify structural marker lines rather than Markdown that merely resembles
+    a heading inside a user's note.
+    """
+
+    lines = annotation_text.splitlines(keepends=True)
+    if not (
+        0 <= link.sidecar_start_line <= link.sidecar_end_line < len(lines)
+    ):
+        raise ValueError("annotation block is outside the sidecar document")
+    if not lines[link.sidecar_start_line].startswith(ANNOTATION_MARKER):
+        raise ValueError("annotation block start marker no longer matches")
+    if lines[link.sidecar_end_line].strip() != "<!-- /pta:annotation -->":
+        raise ValueError("annotation block end marker no longer matches")
+
+    block_start = sum(len(line) for line in lines[: link.sidecar_start_line])
+    block_end = sum(len(line) for line in lines[: link.sidecar_end_line + 1])
+    prefix = annotation_text[:block_start].rstrip("\r\n")
+    suffix = annotation_text[block_end:].lstrip("\r\n")
+    if prefix and suffix:
+        updated = prefix + "\n\n" + suffix
+    elif prefix:
+        updated = prefix + "\n"
+    else:
+        updated = suffix
+
+    renumbered = updated.splitlines(keepends=True)
+    ordinal = 0
+    waiting_for_heading = False
+    for index, line in enumerate(renumbered):
+        if line.startswith(ANNOTATION_MARKER):
+            ordinal += 1
+            waiting_for_heading = True
+            continue
+        if line.strip() == "<!-- /pta:annotation -->":
+            waiting_for_heading = False
+            continue
+        if waiting_for_heading and line.startswith("## Annotation "):
+            content = line.rstrip("\r\n")
+            newline = line[len(content) :]
+            renumbered[index] = f"## Annotation {ordinal}{newline}"
+            waiting_for_heading = False
+        elif waiting_for_heading and line.strip() == "```yaml":
+            waiting_for_heading = False
+    return "".join(renumbered)
+
+
 def location_to_offset(text: str, location: Location) -> int:
     """Convert a Textual ``(row, column)`` location to a code-point offset."""
 

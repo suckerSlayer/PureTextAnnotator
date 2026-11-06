@@ -16,6 +16,7 @@ from pure_text_annotator.annotations import (
 )
 from pure_text_annotator import pdfs
 from pure_text_annotator.app import (
+    AnnotationMenuModal,
     AnnotationTextArea,
     EditWarningModal,
     NoteModal,
@@ -521,5 +522,97 @@ def test_pdf_quit_without_annotation_save_does_not_embed(tmp_path: Path) -> None
 
         assert app.quit_completed is True
         assert not output_path.exists()
+
+    asyncio.run(scenario())
+
+
+def test_pdf_annotation_menu_embeds_when_auto_embedding_is_disabled(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source = load_source_file(
+            write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
+        )
+        assert source.pdf_document is not None
+        start = source.text.index("Alpha")
+        end = start + len("Alpha")
+        anchor = source.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        AnnotationStore(source.path).append(
+            create_record(
+                AnnotationDraft(start, end, "Alpha"),
+                "Embedded from the menu",
+                annotation_id="menu-embed",
+                source_text=source.text,
+                pdf_anchor=anchor,
+            )
+        )
+        output_path = tmp_path / "paper.annotated.pdf"
+        app = ViewerApp(
+            source,
+            clipboard_writer=lambda _text: "test",
+            embed_on_annotation_save=False,
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            assert isinstance(app.screen, AnnotationMenuModal)
+            assert app.screen.query_one("#menu-embed-pdf").disabled is False
+            await pilot.press("e")
+            await pilot.pause()
+
+            assert output_path.is_file()
+            annotation = PdfReader(output_path).pages[0]["/Annots"][0].get_object()
+            assert annotation["/NM"] == "menu-embed"
+            assert annotation["/Contents"] == "Embedded from the menu"
+
+    asyncio.run(scenario())
+
+
+def test_pdf_menu_deletion_refreshes_embedded_copy(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = load_source_file(
+            write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
+        )
+        assert source.pdf_document is not None
+        store = AnnotationStore(source.path)
+        for annotation_id, quote, note in (
+            ("delete-me", "Alpha", "Remove this highlight"),
+            ("keep-me", "beta", "Keep this highlight"),
+        ):
+            start = source.text.index(quote)
+            end = start + len(quote)
+            anchor = source.pdf_document.anchor_for_range(start, end)
+            assert anchor is not None
+            store.append(
+                create_record(
+                    AnnotationDraft(start, end, quote),
+                    note,
+                    annotation_id=annotation_id,
+                    source_text=source.text,
+                    pdf_anchor=anchor,
+                )
+            )
+        output_path = embed_pdf_annotations(source.path).output_path
+        assert len(PdfReader(output_path).pages[0]["/Annots"]) == 2
+        app = ViewerApp(source, clipboard_writer=lambda _text: "test")
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.press("m")
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+
+            annotations = [
+                item.get_object()
+                for item in PdfReader(output_path).pages[0]["/Annots"]
+            ]
+            assert [annotation["/NM"] for annotation in annotations] == [
+                "keep-me"
+            ]
+            assert 'id: "delete-me"' not in store.read_text()
 
     asyncio.run(scenario())

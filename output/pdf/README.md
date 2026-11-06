@@ -257,6 +257,11 @@ pta-view --no-embed-on-save output/pdf/pta-text-layer-manual-test.pdf
 Save an annotation change and then quit. The sidecar and cursor position should
 still be saved, but the annotated PDF copy should not be refreshed.
 
+Open the same session again with `--no-embed-on-save`, press `m`, and choose
+**Embed annotations into PDF copy** (or press `E` in the menu). The copy should
+refresh immediately even though automatic embedding is disabled. The source PDF
+must remain byte-for-byte unchanged.
+
 ## Case 11 PDF rematch regenerates export geometry
 
 The automated fixture replaces a one-page source PDF with a two-page revision
@@ -291,6 +296,8 @@ coordinates. The old document hash must not remain in the selected record.
 | Unchanged PDF reopens from the exact-hash extraction cache | Pass |
 | Changed or corrupt cache data falls back to extraction | Pass |
 | Successful annotation saves refresh the default annotated PDF copy | Pass |
+| `m`, then `E` manually embeds even with automatic embedding disabled | Pass |
+| Deleting a PDF annotation removes its generated highlight on refresh | Pass |
 | Ordinary quit performs no PDF embedding | Pass |
 | Any source, sidecar, or generated-copy change invalidates the skip | Pass |
 | Reopening an unchanged source restores and centers its cursor | Pass |

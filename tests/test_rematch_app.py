@@ -47,6 +47,21 @@ def prepare_shifted_case(tmp_path: Path) -> tuple[Path, AnnotationStore, str]:
     return source_path, store, before
 
 
+def test_annotation_menu_opens_rematch_review(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path, _store, _before = prepare_shifted_case(tmp_path)
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await pilot.press("m", "r")
+            await pilot.pause()
+            assert isinstance(app.screen, RematchReviewModal)
+
+    asyncio.run(scenario())
+
+
 def test_pdf_rematch_apply_refreshes_geometry_anchor(tmp_path: Path) -> None:
     async def scenario() -> None:
         source_path = write_text_pdf(

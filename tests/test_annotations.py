@@ -8,6 +8,7 @@ from pure_text_annotator.annotations import (
     AnnotationRange,
     AnnotationStore,
     create_record,
+    delete_annotation_block,
     draft_from_selection,
     location_to_offset,
     parse_annotation_links,
@@ -210,3 +211,50 @@ range:
 """
 
     assert parse_annotation_ranges(annotation_text) == ()
+
+
+def test_delete_annotation_block_preserves_notes_and_renumbers_headings(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chapter.txt"
+    source.write_text("one two three", encoding="utf-8")
+    store = AnnotationStore(source)
+    for annotation_id, start, end, quote, note in (
+        ("first", 0, 3, "one", "First note"),
+        ("second", 4, 7, "two", "Second note"),
+        (
+            "third",
+            8,
+            13,
+            "three",
+            "A note that contains\n## Annotation 99\nwithout being metadata.",
+        ),
+    ):
+        store.append(
+            create_record(
+                AnnotationDraft(start, end, quote),
+                note,
+                annotation_id=annotation_id,
+                created_at="2026-11-07T10:00:00Z",
+            )
+        )
+
+    original = store.read_text()
+    updated = delete_annotation_block(original, parse_annotation_links(original)[1])
+
+    assert 'id: "second"' not in updated
+    assert 'id: "first"' in updated
+    assert 'id: "third"' in updated
+    assert "## Annotation 1" in updated
+    assert "## Annotation 2" in updated
+    assert "## Annotation 3" not in updated
+    assert "## Annotation 99" in updated
+    assert parse_annotation_ranges(updated) == (
+        AnnotationRange(0, 3),
+        AnnotationRange(8, 13),
+    )
+
+    for remaining_link in reversed(parse_annotation_links(updated)):
+        updated = delete_annotation_block(updated, remaining_link)
+    assert AnnotationStore.MARKER not in updated
+    assert updated.endswith("# Annotations\n")

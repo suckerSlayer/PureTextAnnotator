@@ -181,6 +181,8 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | Ctrl+R in Normal mode | Redo the most recently undone batch |
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
+| Ctrl+N / Ctrl+P | Jump to the next / previous annotation |
+| `m` | Open the annotation action menu |
 | `R` | Scan stale annotations and open rematch review |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
 | `.` | Manually align and center both panes' cursor lines |
@@ -202,6 +204,26 @@ Both panes provide trailing scroll space equal to half their visible height.
 This lets the final document line move to the middle of its pane with `zz` or
 manual alignment; the blank space is visual only and is never saved to either
 file.
+
+## Annotation action menu
+
+Press `m` in Normal mode from either pane to open a compact menu while keeping
+the source and annotation panes visible. The menu provides these actions:
+
+- **Delete current annotation** asks for confirmation, atomically removes the
+  selected sidecar block, renumbers the remaining display headings, and leaves
+  the source unchanged. Save or discard unrelated edits before deleting.
+- **Rematch annotations** opens the same review-first workflow as `R`.
+- **Show keybindings** opens a scrollable in-application reference.
+- **Embed annotations into PDF copy** manually refreshes the default
+  `.annotated.pdf` copy from all saved annotations. It is available only for PDF
+  sources, never overwrites the original PDF, and remains available when
+  `--no-embed-on-save` disables automatic refreshes.
+
+In Normal mode, Ctrl+N and Ctrl+P move through annotations with wraparound. In
+the source pane, navigation follows source-range order; in the annotation pane,
+it follows sidecar order. Cross-pane movement continues to respect the current
+Normal, Sync, or Off alignment mode.
 
 ## Edit text
 
@@ -380,8 +402,9 @@ dimmed so the current note remains easy to identify.
   new notes
 - Review-first deterministic rematching with confidence estimates, backup,
   validation, and rollback
+- Structured deletion of the current annotation with confirmation
 - Literal search with forward/backward repetition in both panes
-- No structured annotation deletion or semantic/AI matching yet
+- No structured annotation-type filtering or semantic/AI matching yet
 
 ## Test
 
