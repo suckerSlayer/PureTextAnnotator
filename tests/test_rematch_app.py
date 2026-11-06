@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from pypdf import PdfReader
 from textual.widgets import Static
 
 from pure_text_annotator.annotations import (
@@ -86,6 +87,15 @@ def test_pdf_rematch_apply_refreshes_geometry_anchor(tmp_path: Path) -> None:
             assert current.pdf_document.document_sha256 in saved
             assert original.pdf_document.document_sha256 not in saved
             assert "    - page_index: 1" in saved
+            output_path = tmp_path / "paper.annotated.pdf"
+            assert output_path.is_file()
+            annotations = tuple(
+                item.get_object()
+                for item in PdfReader(output_path).pages[1][
+                    "/Annots"
+                ].get_object()
+            )
+            assert annotations[0]["/NM"] == "pdf-rematch-app"
 
     asyncio.run(scenario())
 

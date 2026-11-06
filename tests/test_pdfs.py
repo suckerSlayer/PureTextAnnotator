@@ -392,6 +392,7 @@ def test_pdf_app_blocks_source_edit_and_saves_geometry_note(tmp_path: Path) -> N
         source = load_source_file(
             write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
         )
+        output_path = tmp_path / "paper.annotated.pdf"
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(120, 28)) as pilot:
@@ -420,5 +421,105 @@ def test_pdf_app_blocks_source_edit_and_saves_geometry_note(tmp_path: Path) -> N
             assert "pdf_anchor:" in saved
             assert "quad_points_pdf:" in saved
             assert annotator.canonical_text == saved
+            assert output_path.is_file()
+            annotations = tuple(
+                item.get_object()
+                for item in PdfReader(output_path).pages[0][
+                    "/Annots"
+                ].get_object()
+            )
+            assert len(annotations) == 1
+            assert annotations[0]["/Contents"] == "First PDF note."
+
+    asyncio.run(scenario())
+
+
+def test_pdf_annotation_ctrl_s_refreshes_copy(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = load_source_file(
+            write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
+        )
+        assert source.pdf_document is not None
+        start = source.text.index("Alpha")
+        end = start + len("Alpha")
+        anchor = source.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        AnnotationStore(source.path).append(
+            create_record(
+                AnnotationDraft(start, end, "Alpha"),
+                "Original note",
+                annotation_id="save-refresh",
+                source_text=source.text,
+                pdf_anchor=anchor,
+            )
+        )
+        output_path = tmp_path / "paper.annotated.pdf"
+        app = ViewerApp(source, clipboard_writer=lambda _text: "test")
+
+        async with app.run_test(size=(110, 28)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.press("tab", "i")
+            note_end = annotator.text.index("Original note") + len(
+                "Original note"
+            )
+            annotator.move_cursor(
+                annotator.document.get_location_from_index(note_end)
+            )
+            await pilot.press(
+                "space",
+                "u",
+                "p",
+                "d",
+                "a",
+                "t",
+                "e",
+                "d",
+                "escape",
+                "ctrl+s",
+            )
+            await pilot.pause()
+
+            assert app.quit_completed is False
+            assert output_path.is_file()
+            annotations = tuple(
+                item.get_object()
+                for item in PdfReader(output_path).pages[0][
+                    "/Annots"
+                ].get_object()
+            )
+            assert annotations[0]["/Contents"] == "Original note updated"
+
+    asyncio.run(scenario())
+
+
+def test_pdf_quit_without_annotation_save_does_not_embed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = load_source_file(
+            write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
+        )
+        assert source.pdf_document is not None
+        start = source.text.index("Alpha")
+        end = start + len("Alpha")
+        anchor = source.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        AnnotationStore(source.path).append(
+            create_record(
+                AnnotationDraft(start, end, "Alpha"),
+                "Existing note",
+                annotation_id="quit-does-not-embed",
+                source_text=source.text,
+                pdf_anchor=anchor,
+            )
+        )
+        output_path = tmp_path / "paper.annotated.pdf"
+        app = ViewerApp(source, clipboard_writer=lambda _text: "test")
+
+        async with app.run_test(size=(110, 28)) as pilot:
+            assert not output_path.exists()
+            await pilot.press("q")
+            await pilot.pause()
+
+        assert app.quit_completed is True
+        assert not output_path.exists()
 
     asyncio.run(scenario())

@@ -103,25 +103,26 @@ the note text, stable annotation ID, author, subject, and creation timestamp.
 Consequently, a single note that crosses two pages produces two highlights
 with the same ID and note text.
 
-After a confirmed quit from `pta-view`, a PDF session with saved annotation
-records automatically refreshes the conventional `paper.annotated.pdf` copy.
-This post-quit refresh may atomically replace that generated default copy so it
-tracks the latest saved sidecar. It never replaces the source PDF or sidecar.
-Choose Discard in the dirty-buffer prompt to export the previously saved
-sidecar, or Save to export the new edits.
+Every successful PDF annotation save triggers an immediate refresh of the
+conventional `paper.annotated.pdf` copy. This includes adding a note, pressing
+Ctrl+S after editing annotations, applying a confirmed rematch, and choosing
+Save while quitting with annotation changes. The refresh may atomically replace
+only that generated copy; it never replaces the source PDF or sidecar. An
+ordinary quit, or choosing Discard, does not perform embedding.
 
 After a successful export, a private receipt records exact SHA-256 fingerprints
-of the source, sidecar, and generated copy. A later quit skips the rebuild and
-reports `Annotated PDF already current` only when all three files still match.
-Changing or replacing any one of them invalidates the receipt and triggers a
-fully validated atomic refresh. Receipt corruption or an unwritable state
-directory merely disables the shortcut; it never bypasses validation or blocks
-export. Set `PTA_EMBED_STATE_DIR` to choose another receipt directory.
+of the source, sidecar, and generated copy. A later annotation save reports
+`Annotated PDF already current` without rebuilding only when all three files
+still match. Changing or replacing any one of them invalidates the receipt and
+the next annotation save triggers a fully validated atomic refresh. Receipt
+corruption or an unwritable state directory merely disables the shortcut; it
+never bypasses validation or blocks export. Set `PTA_EMBED_STATE_DIR` to choose
+another receipt directory.
 
 Use this option to skip the automatic refresh for one session:
 
 ```bash
-pta-view --no-embed-on-quit path/to/paper.pdf
+pta-view --no-embed-on-save path/to/paper.pdf
 ```
 
 Export is deliberately fail-closed. Every sidecar record must be a valid note
@@ -191,7 +192,7 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | Mouse drag | Select text |
 | `y`, Ctrl+C, or Cmd+C | Copy selected text |
 | Escape | Clear the selection |
-| `q` or Ctrl+Q | Quit; prompt for unsaved changes, remember the cursor, and refresh a PDF copy |
+| `q` or Ctrl+Q | Quit; prompt for unsaved changes and remember the cursor |
 
 The `w`, `b`, and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
@@ -371,7 +372,7 @@ dimmed so the current note remains easy to identify.
   no OCR or rendered-page pane
 - Exact-hash PDF extraction caching for faster repeat opens
 - Exact-source cursor restoration across viewer sessions
-- Automatic refresh of the default annotated PDF copy after confirmed quit
+- Automatic refresh of the default annotated PDF copy after annotation saves
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving

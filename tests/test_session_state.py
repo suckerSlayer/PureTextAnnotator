@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pure_text_annotator.cli as viewer_cli
 from pure_text_annotator.files import LoadedTextFile
@@ -75,16 +74,13 @@ def test_invalid_or_unwritable_cursor_state_is_ignored(tmp_path: Path) -> None:
     assert not save_cursor_position(source, (0, 1), state_dir=blocked)
 
 
-def test_pta_view_runs_cursor_and_embed_actions_after_confirmed_quit(
+def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
     tmp_path: Path,
     monkeypatch,
-    capsys,
 ) -> None:
     source = _source(tmp_path / "paper.pdf")
-    sidecar = tmp_path / "paper.pdf.annotations.md"
-    output = tmp_path / "paper.annotated.pdf"
     saved = []
-    embedded = []
+    embedding_settings = []
 
     class FakeViewerApp:
         def __init__(
@@ -93,12 +89,13 @@ def test_pta_view_runs_cursor_and_embed_actions_after_confirmed_quit(
             *,
             soft_wrap,
             initial_source_cursor,
+            embed_on_annotation_save,
         ) -> None:
             assert loaded_source is source
             assert soft_wrap is True
             assert initial_source_cursor == (1, 2)
+            embedding_settings.append(embed_on_annotation_save)
             self.source = loaded_source
-            self.annotation_store = SimpleNamespace(path=sidecar)
             self.quit_completed = True
             self.exit_source_cursor = (2, 3)
 
@@ -117,25 +114,15 @@ def test_pta_view_runs_cursor_and_embed_actions_after_confirmed_quit(
         "save_cursor_position",
         lambda saved_source, cursor: saved.append((saved_source, cursor)) or True,
     )
-    monkeypatch.setattr(
-        viewer_cli,
-        "_embed_pdf_copy_on_quit",
-        lambda embedded_source, path: embedded.append(
-            (embedded_source, path)
-        )
-        or viewer_cli.EmbeddedSummary(2, 3, output, True),
-    )
-
     assert viewer_cli.main([str(source.path)]) == 0
 
     assert saved == [(source, (2, 3))]
-    assert embedded == [(source, sidecar)]
-    assert str(output) in capsys.readouterr().out
+    assert embedding_settings == [True]
 
     saved.clear()
-    embedded.clear()
+    embedding_settings.clear()
     assert viewer_cli.main(
-        ["--no-embed-on-quit", str(source.path)]
+        ["--no-embed-on-save", str(source.path)]
     ) == 0
     assert saved == [(source, (2, 3))]
-    assert embedded == []
+    assert embedding_settings == [False]

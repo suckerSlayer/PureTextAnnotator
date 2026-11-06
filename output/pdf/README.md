@@ -217,43 +217,45 @@ Changing any PDF byte, changing the extraction profile or `pdfplumber` version,
 or corrupting the cache must also trigger safe re-extraction. A cache read or
 write failure must never prevent the PDF from opening.
 
-## Case 10 Quit export and cursor restoration
+## Case 10 Save-triggered export and cursor restoration
 
-Ensure the sidecar contains at least one saved annotation. Open the source,
-search for `BEGIN CROSS PAGE`, leave the source cursor on that result, and quit
-with `q`:
+Open the source, add a PDF annotation or edit an existing note, and save it.
+Then search for `BEGIN CROSS PAGE`, leave the source cursor on that result, and
+quit with `q`:
 
 ```bash
 pta-view output/pdf/pta-text-layer-manual-test.pdf
 ```
 
-Expected results after the TUI closes:
+Expected results immediately after the annotation save, while the TUI remains
+open:
 
-- The terminal reports the number of annotations and PDF highlights written.
 - `pta-text-layer-manual-test.annotated.pdf` is created or atomically refreshed.
-- The original PDF and sidecar remain byte-for-byte unchanged.
-- Choosing Save in the dirty-buffer prompt exports the newly saved sidecar;
-  choosing Discard exports the prior on-disk sidecar.
+- The embedding step does not modify the original PDF or make any further
+  change to the newly saved sidecar.
+- Adding a note, pressing Ctrl+S after an annotation edit, or applying a PDF
+  rematch all trigger the same refresh.
+- If quitting with an unsaved annotation edit, choosing Save refreshes the copy
+  before exiting; choosing Discard does not embed anything.
 
-Without changing the PDF, sidecar, or generated copy, open and quit once more.
-The terminal should report `Annotated PDF already current` almost immediately,
-and the generated copy's modification time should remain unchanged. Edit one
-note and quit again; the receipt must be invalidated and the copy refreshed.
-Replacing or modifying the generated copy must likewise force a refresh.
+Record the generated copy's modification time, then quit without changing or
+saving annotations. Its modification time should remain unchanged because an
+ordinary quit no longer performs embedding. Edit and save one note; the receipt
+must be invalidated and the copy refreshed. Replacing or modifying the generated
+copy must likewise force a refresh on the next annotation save.
 
 Open the source again. The cursor should return to and center the saved
 `BEGIN CROSS PAGE` position. Cursor restoration is ignored safely if the PDF,
 extractor version, or extraction profile has changed.
 
-For an opt-out check, quit after launching with:
+For an opt-out check, launch with:
 
 ```bash
-pta-view --no-embed-on-quit output/pdf/pta-text-layer-manual-test.pdf
+pta-view --no-embed-on-save output/pdf/pta-text-layer-manual-test.pdf
 ```
 
-The cursor should still be remembered, but the annotated PDF copy should not be
-refreshed during that session. If the sidecar contains no annotation records,
-automatic embedding is skipped.
+Save an annotation change and then quit. The sidecar and cursor position should
+still be saved, but the annotated PDF copy should not be refreshed.
 
 ## Case 11 PDF rematch regenerates export geometry
 
@@ -288,8 +290,8 @@ coordinates. The old document hash must not remain in the selected record.
 | Source PDF and sidecar remain byte-for-byte unchanged | Pass |
 | Unchanged PDF reopens from the exact-hash extraction cache | Pass |
 | Changed or corrupt cache data falls back to extraction | Pass |
-| Confirmed quit refreshes the default annotated PDF copy | Pass |
-| Unchanged quit skips PDF rebuilding using exact three-file hashes | Pass |
+| Successful annotation saves refresh the default annotated PDF copy | Pass |
+| Ordinary quit performs no PDF embedding | Pass |
 | Any source, sidecar, or generated-copy change invalidates the skip | Pass |
 | Reopening an unchanged source restores and centers its cursor | Pass |
 | Confirmed PDF rematch regenerates geometry and embeds on the new page | Pass |

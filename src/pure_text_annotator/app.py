@@ -2586,6 +2586,7 @@ class ViewerApp(App[None]):
         source_writer: SourceWriter = save_text_file,
         annotation_store: Optional[AnnotationStore] = None,
         initial_source_cursor: Optional[tuple[int, int]] = None,
+        embed_on_annotation_save: bool = True,
     ) -> None:
         super().__init__()
         self.source = source
@@ -2593,6 +2594,7 @@ class ViewerApp(App[None]):
         self.soft_wrap = soft_wrap
         self._clipboard_writer = clipboard_writer
         self._source_writer = source_writer
+        self.embed_on_annotation_save = embed_on_annotation_save
         self.initial_source_cursor = initial_source_cursor
         self.exit_source_cursor: Optional[tuple[int, int]] = None
         self.quit_completed = False
@@ -3297,6 +3299,7 @@ class ViewerApp(App[None]):
         viewer.focus()
         self._align_annotation_to_source()
         self._refresh_status()
+        self._refresh_pdf_copy_after_annotation_save(source=saved_source)
         self.notify(
             "Demo restored to its default stale case. Press R again to scan.",
             timeout=4,
@@ -3444,6 +3447,7 @@ class ViewerApp(App[None]):
         viewer.focus()
         self._align_annotation_to_source()
         self._refresh_status()
+        self._refresh_pdf_copy_after_annotation_save(source=disk_source)
         backup_message = (
             f" Backup: {backup_path.name}." if backup_path is not None else ""
         )
@@ -3573,6 +3577,57 @@ class ViewerApp(App[None]):
         self.quit_completed = True
         self.exit()
 
+    def _refresh_pdf_copy_after_annotation_save(
+        self, *, source: Optional[LoadedTextFile] = None
+    ) -> None:
+        """Refresh the derived PDF copy immediately after sidecar persistence."""
+
+        current_source = self.source if source is None else source
+        if (
+            not self.embed_on_annotation_save
+            or current_source.source_kind != "pdf"
+        ):
+            return
+
+        from .embed import (
+            PdfEmbedError,
+            default_output_path,
+            embed_pdf_annotations,
+        )
+        from .embed_state import load_current_embed_receipt
+
+        output_path = default_output_path(current_source.path).resolve()
+        receipt = load_current_embed_receipt(
+            current_source.path,
+            self.annotation_store.path,
+            output_path,
+        )
+        if receipt is not None:
+            self.notify(
+                f"Annotated PDF already current: {output_path.name}",
+                timeout=2,
+            )
+            return
+        try:
+            result = embed_pdf_annotations(
+                current_source.path,
+                annotations_path=self.annotation_store.path,
+                force=True,
+                loaded_source=current_source,
+            )
+        except PdfEmbedError as error:
+            self.notify(
+                "Annotations were saved, but the annotated PDF could not be "
+                f"refreshed: {error}",
+                severity="error",
+                timeout=6,
+            )
+            return
+        self.notify(
+            f"Refreshed annotated PDF: {result.output_path.name}",
+            timeout=3,
+        )
+
     def _save_dirty_changes(self) -> bool:
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
@@ -3600,6 +3655,7 @@ class ViewerApp(App[None]):
                 self._refresh_status()
                 return False
             self._saved_annotation_text = saved_annotations
+            self._refresh_pdf_copy_after_annotation_save()
 
         self._refresh_status()
         return True
@@ -3967,6 +4023,7 @@ class ViewerApp(App[None]):
             viewer.set_active_annotation_range(newest_link.source_range)
         viewer.action_cancel_visual()
         viewer.focus()
+        self._refresh_pdf_copy_after_annotation_save()
         self.notify(
             f"Saved annotation for range [{draft.start}, {draft.end})",
             timeout=2,
