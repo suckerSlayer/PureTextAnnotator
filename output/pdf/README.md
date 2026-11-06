@@ -217,6 +217,59 @@ Changing any PDF byte, changing the extraction profile or `pdfplumber` version,
 or corrupting the cache must also trigger safe re-extraction. A cache read or
 write failure must never prevent the PDF from opening.
 
+## Case 10 Quit export and cursor restoration
+
+Ensure the sidecar contains at least one saved annotation. Open the source,
+search for `BEGIN CROSS PAGE`, leave the source cursor on that result, and quit
+with `q`:
+
+```bash
+pta-view output/pdf/pta-text-layer-manual-test.pdf
+```
+
+Expected results after the TUI closes:
+
+- The terminal reports the number of annotations and PDF highlights written.
+- `pta-text-layer-manual-test.annotated.pdf` is created or atomically refreshed.
+- The original PDF and sidecar remain byte-for-byte unchanged.
+- Choosing Save in the dirty-buffer prompt exports the newly saved sidecar;
+  choosing Discard exports the prior on-disk sidecar.
+
+Without changing the PDF, sidecar, or generated copy, open and quit once more.
+The terminal should report `Annotated PDF already current` almost immediately,
+and the generated copy's modification time should remain unchanged. Edit one
+note and quit again; the receipt must be invalidated and the copy refreshed.
+Replacing or modifying the generated copy must likewise force a refresh.
+
+Open the source again. The cursor should return to and center the saved
+`BEGIN CROSS PAGE` position. Cursor restoration is ignored safely if the PDF,
+extractor version, or extraction profile has changed.
+
+For an opt-out check, quit after launching with:
+
+```bash
+pta-view --no-embed-on-quit output/pdf/pta-text-layer-manual-test.pdf
+```
+
+The cursor should still be remembered, but the annotated PDF copy should not be
+refreshed during that session. If the sidecar contains no annotation records,
+automatic embedding is skipped.
+
+## Case 11 PDF rematch regenerates export geometry
+
+The automated fixture replaces a one-page source PDF with a two-page revision
+that moves the annotated quotation onto page 2, applies the reviewed rematch,
+and then exports the result:
+
+```bash
+python -m pytest tests/test_pdfs.py -k pdf_rematch_refreshes_geometry -q
+```
+
+Expected result: the rematched sidecar contains the revised PDF byte hash and a
+`pdf_anchor` fragment with `page_index: 1`. `pta-embed` then succeeds and places
+the standard highlight on PDF page 2, rather than retaining the old page-1
+coordinates. The old document hash must not remain in the selected record.
+
 ## Pass checklist
 
 | Check | Expected |
@@ -235,3 +288,8 @@ write failure must never prevent the PDF from opening.
 | Source PDF and sidecar remain byte-for-byte unchanged | Pass |
 | Unchanged PDF reopens from the exact-hash extraction cache | Pass |
 | Changed or corrupt cache data falls back to extraction | Pass |
+| Confirmed quit refreshes the default annotated PDF copy | Pass |
+| Unchanged quit skips PDF rebuilding using exact three-file hashes | Pass |
+| Any source, sidecar, or generated-copy change invalidates the skip | Pass |
+| Reopening an unchanged source restores and centers its cursor | Pass |
+| Confirmed PDF rematch regenerates geometry and embeds on the new page | Pass |

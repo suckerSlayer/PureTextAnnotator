@@ -9,9 +9,13 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .annotations import AnnotationRange
+from .annotations import AnnotationRange, PdfAnchor, render_pdf_anchor
+
+
+if TYPE_CHECKING:
+    from .pdfs import PdfDocument
 
 
 class RematchStatus(str, Enum):
@@ -969,24 +973,43 @@ def _replace_range(metadata: str, source_range: AnnotationRange) -> str:
     return metadata[: range_match.end()] + body + metadata[body_end:]
 
 
+def _top_level_block(metadata: str, name: str) -> Optional[str]:
+    match = re.search(
+        rf"(?m)^{re.escape(name)}:[ \t]*(?:\n|$)", metadata
+    )
+    if match is None:
+        return None
+    tail = metadata[match.end() :]
+    next_top_level = re.search(r"(?m)^(?=\S)", tail)
+    end = match.end() + (
+        next_top_level.start() if next_top_level is not None else len(tail)
+    )
+    return metadata[match.start() : end]
+
+
+def _without_top_level_block(metadata: str, name: str) -> str:
+    while True:
+        block = _top_level_block(metadata, name)
+        if block is None:
+            return metadata
+        start = metadata.index(block)
+        metadata = metadata[:start] + metadata[start + len(block) :]
+
+
 def _metadata_with_anchors_and_history(
     metadata: str,
     source: str,
     record: ParsedAnnotation,
     candidate: RematchCandidate,
     rematched_at: str,
+    pdf_anchor: Optional[PdfAnchor],
 ) -> str:
     metadata = _replace_range(metadata, candidate.source_range)
-    anchor_match = re.search(r"(?m)^anchor:[ \t]*(?:\n|$)", metadata)
-    if anchor_match is not None:
-        tail = metadata[anchor_match.end() :]
-        next_top_level = re.search(r"(?m)^(?=\S)", tail)
-        anchor_end = anchor_match.end() + (
-            next_top_level.start() if next_top_level is not None else len(tail)
-        )
-        metadata = metadata[: anchor_match.start()] + metadata[anchor_end:]
+    metadata = _without_top_level_block(metadata, "anchor")
+    metadata = _without_top_level_block(metadata, "pdf_anchor")
 
     anchor_yaml = _anchor_yaml(source, candidate.source_range)
+    pdf_anchor_yaml = render_pdf_anchor(pdf_anchor) if pdf_anchor is not None else ""
     history_match = re.search(
         r"(?m)^rematch_history:[ \t]*(?:\n|$)", metadata
     )
@@ -994,7 +1017,13 @@ def _metadata_with_anchors_and_history(
     if history_match is None:
         if metadata and not metadata.endswith("\n"):
             metadata += "\n"
-        return metadata + anchor_yaml + "rematch_history:\n" + history_item
+        return (
+            metadata
+            + anchor_yaml
+            + pdf_anchor_yaml
+            + "rematch_history:\n"
+            + history_item
+        )
 
     tail = metadata[history_match.end() :]
     next_top_level = re.search(r"(?m)^(?=\S)", tail)
@@ -1004,6 +1033,7 @@ def _metadata_with_anchors_and_history(
     return (
         metadata[: history_match.start()]
         + anchor_yaml
+        + pdf_anchor_yaml
         + metadata[history_match.start() : history_end]
         + history_item
         + metadata[history_end:]
@@ -1016,6 +1046,7 @@ def _rewrite_block(
     record: ParsedAnnotation,
     candidate: RematchCandidate,
     rematched_at: str,
+    pdf_anchor: Optional[PdfAnchor],
 ) -> str:
     fence_open = re.search(r"(?m)^```yaml[ \t]*(?:\n|$)", block)
     if fence_open is None:
@@ -1033,6 +1064,7 @@ def _rewrite_block(
         record,
         candidate,
         rematched_at,
+        pdf_anchor,
     )
     block = block[:metadata_start] + metadata + block[metadata_end:]
 
@@ -1062,8 +1094,9 @@ def apply_rematches(
     choices: Iterable[RematchChoice],
     *,
     rematched_at: str,
+    pdf_document: Optional["PdfDocument"] = None,
 ) -> str:
-    """Build a rewritten sidecar in memory for explicitly chosen matches."""
+    """Build a rewritten sidecar and refresh selected PDF geometry anchors."""
 
     records = parse_annotation_records(sidecar_text)
     by_id = {record.annotation_id: record for record in records}
@@ -1079,9 +1112,24 @@ def apply_rematches(
         source_range = choice.candidate.source_range
         if not 0 <= source_range.start < source_range.end <= len(source_text):
             raise ValueError(f"candidate outside source: {choice.annotation_id}")
+        pdf_anchor = None
+        if pdf_document is not None:
+            pdf_anchor = pdf_document.anchor_for_range(
+                source_range.start, source_range.end
+            )
+            if pdf_anchor is None:
+                raise ValueError(
+                    "cannot create PDF geometry anchor for "
+                    f"{choice.annotation_id}"
+                )
         block = sidecar_text[record.block_start : record.block_end]
         rewritten = _rewrite_block(
-            block, source_text, record, choice.candidate, rematched_at
+            block,
+            source_text,
+            record,
+            choice.candidate,
+            rematched_at,
+            pdf_anchor,
         )
         replacements.append((record.block_start, record.block_end, rewritten))
 
@@ -1096,8 +1144,10 @@ def validate_applied_rematches(
     after: str,
     source_text: str,
     choices: Iterable[RematchChoice],
+    *,
+    pdf_document: Optional["PdfDocument"] = None,
 ) -> None:
-    """Verify identity fields and every chosen range after a disk write."""
+    """Verify identity, ranges, quotations, and refreshed PDF anchors."""
 
     old_records = parse_annotation_records(before)
     new_records = parse_annotation_records(after)
@@ -1131,6 +1181,39 @@ def validate_applied_rematches(
             raise ValueError(f"range verification failed for {choice.annotation_id}")
         if record.quote != expected:
             raise ValueError(f"quotation verification failed for {choice.annotation_id}")
+        block = after[record.block_start : record.block_end]
+        fence_open = re.search(r"(?m)^```yaml[ \t]*(?:\n|$)", block)
+        if fence_open is None:
+            raise ValueError(
+                f"metadata verification failed for {choice.annotation_id}"
+            )
+        fence_close = re.search(
+            r"(?m)^```[ \t]*(?:\n|$)", block[fence_open.end() :]
+        )
+        if fence_close is None:
+            raise ValueError(
+                f"metadata verification failed for {choice.annotation_id}"
+            )
+        metadata_end = fence_open.end() + fence_close.start()
+        metadata = block[fence_open.end() : metadata_end]
+        actual_pdf_anchor = _top_level_block(metadata, "pdf_anchor")
+        if pdf_document is None:
+            if actual_pdf_anchor is not None:
+                raise ValueError(
+                    f"stale PDF anchor remained for {choice.annotation_id}"
+                )
+            continue
+        expected_pdf_anchor = pdf_document.anchor_for_range(
+            source_range.start, source_range.end
+        )
+        if expected_pdf_anchor is None:
+            raise ValueError(
+                f"PDF geometry verification failed for {choice.annotation_id}"
+            )
+        if actual_pdf_anchor != render_pdf_anchor(expected_pdf_anchor):
+            raise ValueError(
+                f"PDF anchor verification failed for {choice.annotation_id}"
+            )
 
 
 def confidence_summary(choices: Sequence[RematchChoice]) -> Tuple[int, int]:

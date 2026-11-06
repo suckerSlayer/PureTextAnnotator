@@ -102,6 +102,55 @@ class AnnotationRecord:
     pdf_anchor: Optional[PdfAnchor] = None
 
 
+def _pdf_number_list(values: Tuple[float, ...]) -> str:
+    """Render compact, deterministic YAML flow sequences."""
+
+    rounded = [round(float(value), 4) for value in values]
+    return json.dumps(rounded, ensure_ascii=False)
+
+
+def render_pdf_anchor(anchor: PdfAnchor) -> str:
+    """Render one complete PDF geometry anchor as deterministic YAML."""
+
+    lines = [
+        "pdf_anchor:",
+        f"  version: {anchor.version}",
+        f"  document_sha256: {json.dumps(anchor.document_sha256)}",
+        "  extractor:",
+        f"    name: {json.dumps(anchor.extractor_name)}",
+        f"    version: {json.dumps(anchor.extractor_version)}",
+        f"    profile: {json.dumps(anchor.extraction_profile)}",
+        f"  coordinate_system: {json.dumps(anchor.coordinate_system)}",
+        "  fragments:",
+    ]
+    for fragment in anchor.fragments:
+        lines.extend(
+            [
+                f"    - page_index: {fragment.page_index}",
+                "      page_label: "
+                + (
+                    "null"
+                    if fragment.page_label is None
+                    else json.dumps(fragment.page_label, ensure_ascii=False)
+                ),
+                "      page_text_sha256: "
+                + json.dumps(fragment.page_text_sha256),
+                "      text_range:",
+                f"        start: {fragment.text_start}",
+                f"        end: {fragment.text_end}",
+                "      crop_box: " + _pdf_number_list(fragment.crop_box),
+                f"      rotation: {fragment.rotation}",
+                "      rect_pdf: " + _pdf_number_list(fragment.rect_pdf),
+                "      quad_points_pdf:",
+            ]
+        )
+        lines.extend(
+            "        - " + _pdf_number_list(quad)
+            for quad in fragment.quad_points_pdf
+        )
+    return "\n".join(lines) + "\n"
+
+
 def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
     """Extract source-to-sidecar links from annotation metadata blocks.
 
@@ -405,54 +454,6 @@ class AnnotationStore:
     def _quote_block(quote: str) -> str:
         return "\n".join(f"> {line}" if line else ">" for line in quote.split("\n"))
 
-    @staticmethod
-    def _pdf_number_list(values: Tuple[float, ...]) -> str:
-        """Render compact, deterministic YAML flow sequences."""
-
-        rounded = [round(float(value), 4) for value in values]
-        return json.dumps(rounded, ensure_ascii=False)
-
-    def _render_pdf_anchor(self, anchor: PdfAnchor) -> str:
-        lines = [
-            "pdf_anchor:",
-            f"  version: {anchor.version}",
-            f"  document_sha256: {json.dumps(anchor.document_sha256)}",
-            "  extractor:",
-            f"    name: {json.dumps(anchor.extractor_name)}",
-            f"    version: {json.dumps(anchor.extractor_version)}",
-            f"    profile: {json.dumps(anchor.extraction_profile)}",
-            f"  coordinate_system: {json.dumps(anchor.coordinate_system)}",
-            "  fragments:",
-        ]
-        for fragment in anchor.fragments:
-            lines.extend(
-                [
-                    f"    - page_index: {fragment.page_index}",
-                    "      page_label: "
-                    + (
-                        "null"
-                        if fragment.page_label is None
-                        else json.dumps(fragment.page_label, ensure_ascii=False)
-                    ),
-                    "      page_text_sha256: "
-                    + json.dumps(fragment.page_text_sha256),
-                    "      text_range:",
-                    f"        start: {fragment.text_start}",
-                    f"        end: {fragment.text_end}",
-                    "      crop_box: "
-                    + self._pdf_number_list(fragment.crop_box),
-                    f"      rotation: {fragment.rotation}",
-                    "      rect_pdf: "
-                    + self._pdf_number_list(fragment.rect_pdf),
-                    "      quad_points_pdf:",
-                ]
-            )
-            lines.extend(
-                "        - " + self._pdf_number_list(quad)
-                for quad in fragment.quad_points_pdf
-            )
-        return "\n".join(lines) + "\n"
-
     def _render_record(self, record: AnnotationRecord, ordinal: int) -> str:
         annotation_id = json.dumps(record.annotation_id, ensure_ascii=False)
         created_at = json.dumps(record.created_at, ensure_ascii=False)
@@ -476,7 +477,7 @@ class AnnotationStore:
                 f"  original_end: {record.original_end}\n"
             )
         pdf_anchor = (
-            self._render_pdf_anchor(record.pdf_anchor)
+            render_pdf_anchor(record.pdf_anchor)
             if record.pdf_anchor is not None
             else ""
         )

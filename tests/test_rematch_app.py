@@ -17,8 +17,10 @@ from pure_text_annotator.app import (
     VimTextArea,
     ViewerApp,
 )
-from pure_text_annotator.files import load_text_file
+from pure_text_annotator.files import load_source_file, load_text_file
 from pure_text_annotator.rematch import parse_annotation_records
+
+from pdf_fixtures import write_text_pdf
 
 
 def prepare_shifted_case(tmp_path: Path) -> tuple[Path, AnnotationStore, str]:
@@ -42,6 +44,50 @@ def prepare_shifted_case(tmp_path: Path) -> tuple[Path, AnnotationStore, str]:
     )
     source_path.write_text("Inserted preface.\n" + original, encoding="utf-8")
     return source_path, store, before
+
+
+def test_pdf_rematch_apply_refreshes_geometry_anchor(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = write_text_pdf(
+            tmp_path / "paper.pdf", ("Alpha unique target omega",)
+        )
+        original = load_source_file(source_path)
+        assert original.pdf_document is not None
+        start = original.text.index("unique target")
+        end = start + len("unique target")
+        anchor = original.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(start, end, "unique target"),
+                "Move the PDF anchor too.",
+                annotation_id="pdf-rematch-app",
+                source_text=original.text,
+                pdf_anchor=anchor,
+            )
+        )
+        write_text_pdf(
+            source_path,
+            ("A newly inserted page", "Alpha unique target omega"),
+        )
+        current = load_source_file(source_path)
+        assert current.pdf_document is not None
+        app = ViewerApp(current, clipboard_writer=lambda _text: "test")
+
+        async with app.run_test(size=(120, 34)) as pilot:
+            await pilot.press("shift+r", "ctrl+s")
+            await pilot.pause()
+            assert isinstance(app.screen, RematchConfirmModal)
+            await pilot.click("#apply-rematch-confirm")
+            await pilot.pause()
+
+            saved = store.path.read_text(encoding="utf-8")
+            assert current.pdf_document.document_sha256 in saved
+            assert original.pdf_document.document_sha256 not in saved
+            assert "    - page_index: 1" in saved
+
+    asyncio.run(scenario())
 
 
 def test_rematch_cancel_is_read_only_and_apply_creates_backup(

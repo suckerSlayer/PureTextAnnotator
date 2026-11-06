@@ -8,6 +8,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Highlight
 from pypdf.generic import (
     ArrayObject,
+    DecodedStreamObject,
     DictionaryObject,
     FloatObject,
     NameObject,
@@ -20,6 +21,11 @@ from pure_text_annotator.annotations import (
     create_record,
 )
 from pure_text_annotator.embed import PdfEmbedError, embed_pdf_annotations
+from pure_text_annotator.cli import (
+    EmbeddedSummary,
+    QuitActionError,
+    _embed_pdf_copy_on_quit,
+)
 from pure_text_annotator.embed_cli import main
 from pure_text_annotator.files import LoadedTextFile, load_source_file
 
@@ -338,3 +344,135 @@ def test_cli_reports_success_and_validation_errors(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "pta-embed: output already exists" in captured.err
+
+
+def test_quitting_pdf_view_refreshes_default_annotated_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
+    source = load_source_file(source_path)
+    sidecar = _append_note(
+        source,
+        "beta",
+        annotation_id="quit-note",
+        note="Embedded while quitting.",
+    )
+    output = tmp_path / "paper.annotated.pdf"
+    output.write_bytes(b"old generated copy")
+    source_before = source_path.read_bytes()
+    sidecar_before = sidecar.read_bytes()
+
+    summary = _embed_pdf_copy_on_quit(source, sidecar)
+
+    assert summary == EmbeddedSummary(1, 1, output, True)
+    assert source_path.read_bytes() == source_before
+    assert sidecar.read_bytes() == sidecar_before
+    annotation = _annotations(PdfReader(output), 0)[0]
+    assert annotation["/NM"] == "quit-note"
+    assert annotation["/Contents"] == "Embedded while quitting."
+
+    with monkeypatch.context() as patcher:
+        def unexpected_embed(*_args, **_kwargs):
+            raise AssertionError("unchanged quit should not embed again")
+
+        patcher.setattr(
+            "pure_text_annotator.embed.embed_pdf_annotations",
+            unexpected_embed,
+        )
+        assert _embed_pdf_copy_on_quit(source, sidecar) == EmbeddedSummary(
+            1, 1, output, False
+        )
+
+    _append_note(
+        source,
+        "gamma",
+        annotation_id="second-note",
+        note="Refresh after a sidecar change.",
+    )
+    assert _embed_pdf_copy_on_quit(source, sidecar) == EmbeddedSummary(
+        2, 2, output, True
+    )
+    assert len(_annotations(PdfReader(output), 0)) == 2
+
+
+def test_quit_embedding_skips_empty_sidecar_and_reports_stale_anchor(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
+    source = load_source_file(source_path)
+    sidecar = tmp_path / "paper.pdf.annotations.md"
+
+    assert _embed_pdf_copy_on_quit(source, sidecar) is None
+    store = AnnotationStore(source.path, sidecar)
+    sidecar.write_text(store.initial_text(), encoding="utf-8")
+    assert _embed_pdf_copy_on_quit(source, sidecar) is None
+
+    _append_note(source, "beta", annotation_id="stale", note="Stale note")
+    text = sidecar.read_text(encoding="utf-8")
+    text = re.sub(
+        r"(?m)^(  document_sha256: ).+$",
+        r'\1"' + "0" * 64 + '"',
+        text,
+        count=1,
+    )
+    sidecar.write_text(text, encoding="utf-8")
+    with pytest.raises(QuitActionError, match="byte hash"):
+        _embed_pdf_copy_on_quit(source, sidecar)
+
+
+def test_loaded_view_source_avoids_all_pdf_reextraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
+    source = load_source_file(source_path)
+    _append_note(source, "beta", annotation_id="loaded", note="Reuse source")
+
+    def unexpected_load(*_args, **_kwargs):
+        raise AssertionError("embedding should reuse the loaded PDF")
+
+    monkeypatch.setattr(
+        "pure_text_annotator.embed.load_source_file", unexpected_load
+    )
+
+    result = embed_pdf_annotations(source_path, loaded_source=source)
+
+    assert result.annotation_count == 1
+    assert result.output_path.is_file()
+
+
+def test_loaded_view_source_is_rejected_after_pdf_changes(tmp_path: Path) -> None:
+    source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
+    source = load_source_file(source_path)
+    _append_note(source, "beta", annotation_id="loaded", note="Reuse source")
+    source_path.write_bytes(source_path.read_bytes() + b"\n% external change\n")
+
+    with pytest.raises(PdfEmbedError, match="no longer matches"):
+        embed_pdf_annotations(source_path, loaded_source=source)
+
+
+def test_output_verification_rejects_changed_page_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
+    source = load_source_file(source_path)
+    _append_note(source, "beta", annotation_id="mutated", note="A note")
+    original_add_annotation = PdfWriter.add_annotation
+
+    def mutate_page_content(writer, page_number, annotation, *args, **kwargs):
+        result = original_add_annotation(
+            writer, page_number, annotation, *args, **kwargs
+        )
+        stream = DecodedStreamObject()
+        stream.set_data(b"q Q\n")
+        writer.pages[page_number][NameObject("/Contents")] = writer._add_object(
+            stream
+        )
+        return result
+
+    monkeypatch.setattr(PdfWriter, "add_annotation", mutate_page_content)
+
+    with pytest.raises(PdfEmbedError, match="page content differs"):
+        embed_pdf_annotations(source_path, loaded_source=source)
+
+    assert not (tmp_path / "paper.annotated.pdf").exists()

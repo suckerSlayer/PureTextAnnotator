@@ -103,15 +103,58 @@ the note text, stable annotation ID, author, subject, and creation timestamp.
 Consequently, a single note that crosses two pages produces two highlights
 with the same ID and note text.
 
+After a confirmed quit from `pta-view`, a PDF session with saved annotation
+records automatically refreshes the conventional `paper.annotated.pdf` copy.
+This post-quit refresh may atomically replace that generated default copy so it
+tracks the latest saved sidecar. It never replaces the source PDF or sidecar.
+Choose Discard in the dirty-buffer prompt to export the previously saved
+sidecar, or Save to export the new edits.
+
+After a successful export, a private receipt records exact SHA-256 fingerprints
+of the source, sidecar, and generated copy. A later quit skips the rebuild and
+reports `Annotated PDF already current` only when all three files still match.
+Changing or replacing any one of them invalidates the receipt and triggers a
+fully validated atomic refresh. Receipt corruption or an unwritable state
+directory merely disables the shortcut; it never bypasses validation or blocks
+export. Set `PTA_EMBED_STATE_DIR` to choose another receipt directory.
+
+Use this option to skip the automatic refresh for one session:
+
+```bash
+pta-view --no-embed-on-quit path/to/paper.pdf
+```
+
 Export is deliberately fail-closed. Every sidecar record must be a valid note
 with a current text anchor and `pdf_anchor`; the quotation, hashes, page data,
 range, and recomputed geometry must all match. No partial export is produced.
-The command refuses encrypted or signed PDFs, an existing output unless
-`--force` is supplied, and any request to overwrite the source PDF. `--force`
-may replace only the separate output. Existing non-conflicting PDF annotations
-are preserved, and both the source PDF and Markdown sidecar remain unchanged.
-If a PDF has been replaced or a range rematched, recreate/regenerate that
-record's PDF geometry before exporting.
+The generated copy is reopened before replacement and checked for unchanged
+page content streams, page boxes, rotation, resource names, annotation counts,
+note data, and highlight geometry. This avoids a second full PDF text
+extraction while still detecting unintended page-content changes.
+The standalone `pta-embed` command refuses encrypted or signed PDFs, an
+existing output unless `--force` is supplied, and any request to overwrite the
+source PDF. `--force` may replace only the separate output. Existing
+non-conflicting PDF annotations are preserved, and both the source PDF and
+Markdown sidecar remain unchanged. If a PDF has been replaced or a range
+becomes stale, run the confirmed rematch workflow before exporting; applying a
+PDF rematch regenerates that record's geometry automatically.
+
+## Resume cursor position
+
+On a confirmed quit, the source cursor row and column are written atomically to
+the operating system's private user-state directory. Reopening the same
+resolved source path restores and centers that cursor only when the canonical
+source fingerprint still matches. Any text change—or a PDF hash, extractor, or
+extraction-profile change—invalidates the saved position instead of risking a
+jump to unrelated content.
+
+The small state file contains the resolved source path, fingerprint, row, and
+column. It uses private permissions and may be deleted safely. Set
+`PTA_SESSION_STATE_DIR` to choose another directory, or print the active one:
+
+```bash
+python -c "from pure_text_annotator.session_state import session_state_directory; print(session_state_directory())"
+```
 
 ## Controls
 
@@ -148,7 +191,7 @@ record's PDF geometry before exporting.
 | Mouse drag | Select text |
 | `y`, Ctrl+C, or Cmd+C | Copy selected text |
 | Escape | Clear the selection |
-| `q` or Ctrl+Q | Quit; prompt if either pane has unsaved changes |
+| `q` or Ctrl+Q | Quit; prompt for unsaved changes, remember the cursor, and refresh a PDF copy |
 
 The `w`, `b`, and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
@@ -234,7 +277,12 @@ ambiguous, and unresolved counts. Cancel and Review do not write anything.
 **Apply** rechecks source and sidecar fingerprints, creates a timestamped
 `before-rematch` backup, updates only the selected sidecar ranges and quoted
 text, records rematch history, atomically writes, reparses, and rolls back on
-failed validation. The source file is never changed by rematching.
+failed validation. For PDF sources, Apply also regenerates every selected
+record's `pdf_anchor` from the current PDF, including its document hash, page
+fragments, text ranges, boxes, rotation, and highlight quads. The written
+geometry is validated before the transaction completes. If PDF geometry is not
+available, an old anchor is removed so later export fails safely instead of
+using stale coordinates. The source file is never changed by rematching.
 
 Estimates are transparent heuristics rather than guarantees. Short, duplicated,
 or substantially changed quotations are deliberately penalized; leaving a note
@@ -275,12 +323,15 @@ Metadata starts folded. The document front matter and each annotation's YAML
 metadata initially collapse to one muted summary line. With the annotation pane
 focused, press `zi` to toggle metadata folding globally. Move onto a metadata
 region and use `zc` to close it or `zo` to open it; opening and closing one fold
-preserves the state of the others.
+preserves the state of the others. All three commands retain the cursor's visual
+row in the viewport while the surrounding metadata expands or collapses.
 
 Folding changes only the annotation pane's visual projection. Editing, saving,
 undo/redo, rematching, alignment, and dirty tracking continue to use the complete
 sidecar. Entering Edit mode temporarily unfolds the full sidecar; returning to
-Normal mode restores the selected folds.
+Normal mode restores the selected folds. Both transitions preserve the cursor's
+visual row in the viewport, so expanding or collapsing hidden metadata does not
+make the editing position jump on screen.
 
 ## Add an annotation
 
@@ -318,6 +369,8 @@ dimmed so the current note remains easy to identify.
 - PDF source viewing, geometry-aware annotation, and safe highlight export;
   no OCR or rendered-page pane
 - Exact-hash PDF extraction caching for faster repeat opens
+- Exact-source cursor restoration across viewer sessions
+- Automatic refresh of the default annotated PDF copy after confirmed quit
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving

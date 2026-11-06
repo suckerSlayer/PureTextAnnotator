@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from textual.widgets import Input, Static, TextArea
 
 from pure_text_annotator.annotations import (
@@ -54,6 +55,25 @@ def test_viewer_is_read_only_and_supports_vim_movement() -> None:
             original = viewer.text
             await pilot.press("x", "backspace", "delete")
             assert viewer.text == original
+
+    asyncio.run(scenario())
+
+
+def test_viewer_restores_and_captures_source_cursor_on_quit() -> None:
+    async def scenario() -> None:
+        app = ViewerApp(
+            make_source("alpha\nbeta\ngamma"),
+            clipboard_writer=lambda _text: "test",
+            initial_source_cursor=(2, 4),
+        )
+        async with app.run_test(size=(80, 16)) as pilot:
+            await pilot.pause()
+            viewer = app.query_one(VimTextArea)
+            assert viewer.cursor_location == (2, 4)
+            await pilot.press("h", "q")
+
+        assert app.quit_completed is True
+        assert app.exit_source_cursor == (2, 3)
 
     asyncio.run(scenario())
 
@@ -1153,6 +1173,165 @@ def test_annotation_metadata_vim_folds_preserve_canonical_text(
             assert annotator.canonical_text == canonical
             assert store.path.read_text(encoding="utf-8") == canonical
             assert app._dirty_panes() == ()
+
+    asyncio.run(scenario())
+
+
+def test_annotation_edit_unfolding_preserves_cursor_viewport_row(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_text = "\n".join(f"target-{index}" for index in range(10))
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        for index in range(10):
+            quote = f"target-{index}"
+            start = source_text.index(quote)
+            store.append(
+                create_record(
+                    AnnotationDraft(start, start + len(quote), quote),
+                    f"Viewport note {index}",
+                    annotation_id=f"viewport-{index}",
+                    source_text=source_text,
+                )
+            )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.press("tab")
+            target_link = app.annotation_links[7]
+            display_row = annotator._display_line_for_full(
+                target_link.sidecar_note_line
+            )
+            annotator.move_cursor((display_row, 0))
+            cursor_y = annotator.wrapped_document.location_to_offset(
+                annotator.cursor_location
+            ).y
+            annotator.scroll_to(
+                y=cursor_y - 4,
+                animate=False,
+                immediate=True,
+            )
+            await pilot.pause()
+
+            full_cursor = annotator._full_cursor_location()
+            before_enter = float(cursor_y) - float(annotator.scroll_y)
+            assert annotator.scroll_y > 0
+
+            await pilot.press("i")
+            await pilot.pause()
+
+            edit_cursor_y = annotator.wrapped_document.location_to_offset(
+                annotator.cursor_location
+            ).y
+            assert annotator.edit_mode is True
+            assert annotator.cursor_location == full_cursor
+            assert float(edit_cursor_y) - float(
+                annotator.scroll_y
+            ) == pytest.approx(before_enter)
+
+            before_exit = float(edit_cursor_y) - float(annotator.scroll_y)
+            await pilot.press("escape")
+            await pilot.pause()
+
+            folded_cursor_y = annotator.wrapped_document.location_to_offset(
+                annotator.cursor_location
+            ).y
+            assert annotator.edit_mode is False
+            assert annotator.full_line_for_display(
+                annotator.cursor_location[0]
+            ) == full_cursor[0]
+            assert float(folded_cursor_y) - float(
+                annotator.scroll_y
+            ) == pytest.approx(before_exit)
+
+    asyncio.run(scenario())
+
+
+def test_annotation_fold_commands_preserve_cursor_viewport_row(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_text = "\n".join(f"target-{index}" for index in range(10))
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        for index in range(10):
+            quote = f"target-{index}"
+            start = source_text.index(quote)
+            store.append(
+                create_record(
+                    AnnotationDraft(start, start + len(quote), quote),
+                    f"Fold command note {index}",
+                    annotation_id=f"fold-command-{index}",
+                    source_text=source_text,
+                )
+            )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        def viewport_row(annotator: AnnotationTextArea) -> float:
+            cursor_y = annotator.wrapped_document.location_to_offset(
+                annotator.cursor_location
+            ).y
+            return float(cursor_y) - float(annotator.scroll_y)
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.press("tab")
+            target_fold = next(
+                fold
+                for fold in annotator.metadata_folds
+                if fold.key == "annotation:8"
+            )
+            display_row = annotator._display_line_for_full(
+                target_fold.start_line
+            )
+            annotator.move_cursor((display_row, 0))
+            cursor_y = annotator.wrapped_document.location_to_offset(
+                annotator.cursor_location
+            ).y
+            annotator.scroll_to(
+                y=cursor_y - 4,
+                animate=False,
+                immediate=True,
+            )
+            await pilot.pause()
+            assert annotator.scroll_y > 0
+
+            full_cursor = annotator._full_cursor_location()
+            before_open = viewport_row(annotator)
+            await pilot.press("z", "o")
+            await pilot.pause()
+            assert "annotation:8" not in annotator._closed_fold_keys
+            assert annotator._full_cursor_location() == full_cursor
+            assert viewport_row(annotator) == pytest.approx(before_open)
+
+            before_close = viewport_row(annotator)
+            await pilot.press("z", "c")
+            await pilot.pause()
+            assert "annotation:8" in annotator._closed_fold_keys
+            assert annotator._full_cursor_location() == full_cursor
+            assert viewport_row(annotator) == pytest.approx(before_close)
+
+            before_disable = viewport_row(annotator)
+            await pilot.press("z", "i")
+            await pilot.pause()
+            assert annotator.folding_enabled is False
+            assert annotator._full_cursor_location() == full_cursor
+            assert viewport_row(annotator) == pytest.approx(before_disable)
+
+            before_enable = viewport_row(annotator)
+            await pilot.press("z", "i")
+            await pilot.pause()
+            assert annotator.folding_enabled is True
+            assert annotator._full_cursor_location() == full_cursor
+            assert viewport_row(annotator) == pytest.approx(before_enable)
 
     asyncio.run(scenario())
 

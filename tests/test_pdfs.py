@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pypdf import PdfReader
 
 from pure_text_annotator.annotations import (
     AnnotationDraft,
@@ -22,8 +23,15 @@ from pure_text_annotator.app import (
     VimTextArea,
 )
 from pure_text_annotator.cli import build_parser
+from pure_text_annotator.embed import embed_pdf_annotations
 from pure_text_annotator.files import TextFileError, load_source_file, save_text_file
 from pure_text_annotator.pdfs import load_pdf_file, pdf_cache_path
+from pure_text_annotator.rematch import (
+    RematchChoice,
+    apply_rematches,
+    scan_rematches,
+    validate_applied_rematches,
+)
 
 from pdf_fixtures import write_text_pdf
 
@@ -256,6 +264,111 @@ def test_pdf_anchor_is_written_beside_text_anchor(tmp_path: Path) -> None:
     assert "      rect_pdf: [" in saved
     assert "      quad_points_pdf:" in saved
     assert parse_annotation_ranges(saved) == (AnnotationRange(start, start + 4),)
+
+
+def test_pdf_rematch_refreshes_geometry_for_embedding(tmp_path: Path) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "paper.pdf", ("Alpha unique target omega",)
+    )
+    original = load_source_file(source_path)
+    assert original.pdf_document is not None
+    start = original.text.index("unique target")
+    end = start + len("unique target")
+    original_anchor = original.pdf_document.anchor_for_range(start, end)
+    assert original_anchor is not None
+    store = AnnotationStore(source_path)
+    before = store.append(
+        create_record(
+            AnnotationDraft(start, end, "unique target"),
+            "Move this PDF highlight with its text.",
+            annotation_id="pdf-rematch",
+            created_at="2026-11-06T10:00:00Z",
+            source_text=original.text,
+            pdf_anchor=original_anchor,
+        )
+    )
+
+    write_text_pdf(
+        source_path,
+        ("A newly inserted first page", "Alpha unique target omega"),
+    )
+    current = load_source_file(source_path)
+    assert current.pdf_document is not None
+    assert (
+        current.pdf_document.document_sha256
+        != original.pdf_document.document_sha256
+    )
+    candidate = scan_rematches(current.text, before).items[0].proposed
+    assert candidate is not None
+    choice = RematchChoice("pdf-rematch", candidate)
+
+    updated = apply_rematches(
+        before,
+        current.text,
+        (choice,),
+        rematched_at="2026-11-06T11:00:00Z",
+        pdf_document=current.pdf_document,
+    )
+    validate_applied_rematches(
+        before,
+        updated,
+        current.text,
+        (choice,),
+        pdf_document=current.pdf_document,
+    )
+
+    assert original.pdf_document.document_sha256 not in updated
+    assert current.pdf_document.document_sha256 in updated
+    assert "    - page_index: 1" in updated
+    store.path.write_text(updated, encoding="utf-8")
+    result = embed_pdf_annotations(source_path, loaded_source=current)
+    reader = PdfReader(result.output_path)
+    assert reader.pages[0].get("/Annots") is None
+    annotations = tuple(
+        item.get_object()
+        for item in reader.pages[1]["/Annots"].get_object()
+    )
+    assert len(annotations) == 1
+    assert annotations[0]["/NM"] == "pdf-rematch"
+    assert annotations[0]["/Contents"] == "Move this PDF highlight with its text."
+
+
+def test_rematch_without_pdf_geometry_removes_stale_pdf_anchor(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "paper.pdf", ("Alpha unique target omega",)
+    )
+    original = load_source_file(source_path)
+    assert original.pdf_document is not None
+    start = original.text.index("unique target")
+    end = start + len("unique target")
+    anchor = original.pdf_document.anchor_for_range(start, end)
+    assert anchor is not None
+    store = AnnotationStore(source_path)
+    before = store.append(
+        create_record(
+            AnnotationDraft(start, end, "unique target"),
+            "A note.",
+            annotation_id="safe-rematch",
+            source_text=original.text,
+            pdf_anchor=anchor,
+        )
+    )
+    changed = "Inserted text before the PDF projection.\n" + original.text
+    candidate = scan_rematches(changed, before).items[0].proposed
+    assert candidate is not None
+    choice = RematchChoice("safe-rematch", candidate)
+
+    updated = apply_rematches(
+        before,
+        changed,
+        (choice,),
+        rematched_at="2026-11-06T11:00:00Z",
+    )
+    validate_applied_rematches(before, updated, changed, (choice,))
+
+    assert "pdf_anchor:" not in updated
 
 
 def test_blank_pdf_reports_missing_text_layer(tmp_path: Path) -> None:

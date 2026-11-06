@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -24,7 +25,8 @@ from pypdf.generic import (
 )
 
 from .annotations import PdfAnchor, PdfAnchorFragment
-from .files import TextFileError, load_source_file
+from .embed_state import file_sha256, save_embed_receipt
+from .files import LoadedTextFile, TextFileError, load_source_file
 from .rematch import ParsedAnnotation, parse_annotation_records, text_sha256
 
 
@@ -65,6 +67,21 @@ class PdfEmbedResult:
     output_path: Path
     annotation_count: int
     highlight_count: int
+
+
+@dataclass(frozen=True)
+class _PdfPageState:
+    """Page properties that embedding highlights must never alter."""
+
+    content_stream_sha256: Tuple[str, ...]
+    media_box: Tuple[float, ...]
+    crop_box: Tuple[float, ...]
+    trim_box: Tuple[float, ...]
+    bleed_box: Tuple[float, ...]
+    art_box: Tuple[float, ...]
+    rotation: int
+    user_unit: float
+    resource_interface: Tuple[Tuple[str, Tuple[str, ...]], ...]
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -568,11 +585,76 @@ def _numbers(value: object, field: str) -> Tuple[float, ...]:
         raise PdfEmbedError(f"written PDF has invalid {field}") from error
 
 
+def _page_content_stream_hashes(page: object) -> Tuple[str, ...]:
+    contents = page.get("/Contents")  # type: ignore[attr-defined]
+    if contents is None:
+        return ()
+    resolved = _resolve(contents)
+    streams = resolved if isinstance(resolved, (list, ArrayObject)) else (resolved,)
+    hashes = []
+    for raw_stream in streams:
+        stream = _resolve(raw_stream)
+        get_data = getattr(stream, "get_data", None)
+        if not callable(get_data):
+            raise PdfEmbedError("PDF page contains an invalid content stream")
+        data = get_data()
+        if not isinstance(data, bytes):
+            raise PdfEmbedError("PDF page content stream did not decode to bytes")
+        hashes.append(hashlib.sha256(data).hexdigest())
+    return tuple(hashes)
+
+
+def _page_resource_interface(
+    page: object,
+) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    resources = _resolve(page.get("/Resources"))  # type: ignore[attr-defined]
+    if resources is None:
+        return ()
+    if not isinstance(resources, DictionaryObject):
+        raise PdfEmbedError("PDF page contains an invalid resource dictionary")
+    interface = []
+    for raw_category in sorted(resources, key=str):
+        category = str(raw_category)
+        value = _resolve(resources[raw_category])
+        if isinstance(value, DictionaryObject):
+            members = ("dictionary",) + tuple(sorted(map(str, value)))
+        elif isinstance(value, (list, ArrayObject)):
+            members = ("array",) + tuple(str(_resolve(item)) for item in value)
+        else:
+            members = ("value", str(value))
+        interface.append((category, members))
+    return tuple(interface)
+
+
+def _page_box(page: object, name: str) -> Tuple[float, ...]:
+    return tuple(float(value) for value in getattr(page, name))
+
+
+def _page_state(page: object) -> _PdfPageState:
+    """Fingerprint render instructions without re-extracting PDF text."""
+
+    try:
+        return _PdfPageState(
+            content_stream_sha256=_page_content_stream_hashes(page),
+            media_box=_page_box(page, "mediabox"),
+            crop_box=_page_box(page, "cropbox"),
+            trim_box=_page_box(page, "trimbox"),
+            bleed_box=_page_box(page, "bleedbox"),
+            art_box=_page_box(page, "artbox"),
+            rotation=int(page.rotation),  # type: ignore[attr-defined]
+            user_unit=float(page.get("/UserUnit", 1)),  # type: ignore[attr-defined]
+            resource_interface=_page_resource_interface(page),
+        )
+    except PdfEmbedError:
+        raise
+    except Exception as error:
+        raise PdfEmbedError(f"cannot fingerprint PDF page content: {error}") from error
+
+
 def _verify_output(
     path: Path,
     *,
-    source_text: str,
-    source_page_count: int,
+    source_pages: Sequence[_PdfPageState],
     existing_annotation_counts: Sequence[int],
     records: Sequence[PdfEmbedRecord],
 ) -> None:
@@ -582,8 +664,17 @@ def _verify_output(
         raise PdfEmbedError(f"cannot reopen generated PDF: {error}") from error
     if reader.is_encrypted:
         raise PdfEmbedError("generated PDF is unexpectedly encrypted")
-    if len(reader.pages) != source_page_count:
+    if len(reader.pages) != len(source_pages):
         raise PdfEmbedError("generated PDF page count differs from the source")
+
+    for page_index, (page, source_page) in enumerate(
+        zip(reader.pages, source_pages)
+    ):
+        if _page_state(page) != source_page:
+            raise PdfEmbedError(
+                "generated PDF page content differs from the source on page "
+                f"{page_index + 1}"
+            )
 
     additions: Dict[int, int] = {}
     for record in records:
@@ -634,13 +725,6 @@ def _verify_output(
                 f"generated PDF annotation count differs on page {page_index + 1}"
             )
 
-    try:
-        extracted = load_source_file(path)
-    except TextFileError as error:
-        raise PdfEmbedError(f"cannot verify generated PDF text: {error}") from error
-    if extracted.text != source_text:
-        raise PdfEmbedError("generated PDF text differs from the source projection")
-
 
 def embed_pdf_annotations(
     source_path: Path,
@@ -648,6 +732,7 @@ def embed_pdf_annotations(
     annotations_path: Optional[Path] = None,
     output_path: Optional[Path] = None,
     force: bool = False,
+    loaded_source: Optional[LoadedTextFile] = None,
 ) -> PdfEmbedResult:
     """Embed every valid sidecar record into a new, atomically written PDF."""
 
@@ -690,7 +775,11 @@ def embed_pdf_annotations(
     try:
         sidecar_text = sidecar_bytes.decode("utf-8-sig")
     except UnicodeDecodeError as error:
-        raise PdfEmbedError(f"annotation sidecar is not valid UTF-8: {annotations}") from error
+        raise PdfEmbedError(
+            f"annotation sidecar is not valid UTF-8: {annotations}"
+        ) from error
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    annotations_sha256 = hashlib.sha256(sidecar_bytes).hexdigest()
 
     try:
         reader = PdfReader(source)
@@ -706,10 +795,20 @@ def embed_pdf_annotations(
     except Exception as error:
         raise PdfEmbedError(f"cannot inspect source PDF: {error}") from error
 
-    try:
-        loaded_source = load_source_file(source)
-    except TextFileError as error:
-        raise PdfEmbedError(str(error)) from error
+    if loaded_source is None:
+        try:
+            loaded_source = load_source_file(source)
+        except TextFileError as error:
+            raise PdfEmbedError(str(error)) from error
+    elif (
+        loaded_source.path.resolve() != source
+        or loaded_source.source_kind != "pdf"
+        or loaded_source.pdf_document is None
+        or loaded_source.pdf_document.document_sha256 != source_sha256
+    ):
+        raise PdfEmbedError(
+            "loaded PDF source no longer matches the source file on disk"
+        )
     pdf_document = loaded_source.pdf_document
     if pdf_document is None:
         raise PdfEmbedError("source does not provide PDF geometry")
@@ -719,6 +818,8 @@ def embed_pdf_annotations(
         pdf_document=pdf_document,
     )
     existing_counts = _ensure_no_name_collisions(reader, records)
+    source_pages = tuple(_page_state(page) for page in reader.pages)
+    highlight_count = sum(len(record.pdf_anchor.fragments) for record in records)
 
     writer = PdfWriter()
     temporary_path: Optional[Path] = None
@@ -746,8 +847,7 @@ def embed_pdf_annotations(
 
         _verify_output(
             temporary_path,
-            source_text=loaded_source.text,
-            source_page_count=len(reader.pages),
+            source_pages=source_pages,
             existing_annotation_counts=existing_counts,
             records=records,
         )
@@ -761,8 +861,20 @@ def embed_pdf_annotations(
             raise PdfEmbedError(
                 f"output appeared during export: {output}; pass --force to replace it"
             )
+        output_sha256 = file_sha256(temporary_path)
         os.replace(temporary_path, output)
         temporary_path = None
+        if output_sha256 is not None:
+            save_embed_receipt(
+                source,
+                annotations,
+                output,
+                source_sha256=source_sha256,
+                annotations_sha256=annotations_sha256,
+                output_sha256=output_sha256,
+                annotation_count=len(records),
+                highlight_count=highlight_count,
+            )
     except PdfEmbedError:
         raise
     except Exception as error:
@@ -775,7 +887,6 @@ def embed_pdf_annotations(
             except OSError:
                 pass
 
-    highlight_count = sum(len(record.pdf_anchor.fragments) for record in records)
     return PdfEmbedResult(
         source_path=source,
         annotations_path=annotations,

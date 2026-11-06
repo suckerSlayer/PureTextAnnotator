@@ -836,6 +836,30 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         row, column = self.cursor_location
         return self.full_line_for_display(row), column
 
+    def _cursor_viewport_position(self) -> tuple[float, float]:
+        """Capture horizontal scroll and the cursor's visual viewport row."""
+
+        cursor_y = self.wrapped_document.location_to_offset(
+            self.cursor_location
+        ).y
+        return float(self.scroll_x), float(cursor_y) - float(self.scroll_y)
+
+    def _restore_cursor_viewport_position(
+        self, position: tuple[float, float]
+    ) -> None:
+        """Keep the cursor stationary on screen after fold projection changes."""
+
+        scroll_x, viewport_row = position
+        cursor_y = self.wrapped_document.location_to_offset(
+            self.cursor_location
+        ).y
+        self.scroll_to(
+            x=scroll_x,
+            y=float(cursor_y) - viewport_row,
+            animate=False,
+            immediate=True,
+        )
+
     def _set_display_document(self, text: str) -> None:
         """Replace only the rendered document without touching edit history."""
 
@@ -1030,12 +1054,14 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         """Implement Vim's ``zi`` for the metadata fold projection."""
 
         full_cursor = self._full_cursor_location()
+        viewport_position = self._cursor_viewport_position()
         self.folding_enabled = not self.folding_enabled
         if self.folding_enabled and not self._closed_fold_keys:
             self._closed_fold_keys.update(
                 region.key for region in self._fold_regions
             )
         self._apply_fold_projection(full_cursor)
+        self._restore_cursor_viewport_position(viewport_position)
         return (
             "Metadata folds enabled"
             if self.folding_enabled
@@ -1062,8 +1088,10 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         if not self.folding_enabled or region.key not in self._closed_fold_keys:
             return "Metadata fold is already open"
         full_cursor = self._full_cursor_location()
+        viewport_position = self._cursor_viewport_position()
         self._closed_fold_keys.remove(region.key)
         self._apply_fold_projection(full_cursor)
+        self._restore_cursor_viewport_position(viewport_position)
         return f"Opened {region.label}"
 
     def close_metadata_fold(self) -> str:
@@ -1073,9 +1101,11 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         if region is None:
             return "No metadata fold at cursor"
         full_cursor = self._full_cursor_location()
+        viewport_position = self._cursor_viewport_position()
         self.folding_enabled = True
         self._closed_fold_keys.add(region.key)
         self._apply_fold_projection(full_cursor)
+        self._restore_cursor_viewport_position(viewport_position)
         return f"Closed {region.label}"
 
     def set_annotation_links(
@@ -1228,6 +1258,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
 
     def enter_edit_mode(self) -> None:
         full_cursor = self._full_cursor_location()
+        viewport_position = self._cursor_viewport_position()
         if self._display_is_projection:
             self._set_display_document(self._canonical_text)
             line_count = len(self._canonical_text.split("\n"))
@@ -1240,11 +1271,13 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self.selection = Selection.cursor(self.cursor_location)
         self.read_only = False
         self.edit_mode = True
+        self._restore_cursor_viewport_position(viewport_position)
         self.post_message(self.ModeChanged())
 
     def leave_edit_mode(self) -> None:
         if not self.edit_mode:
             return
+        viewport_position = self._cursor_viewport_position()
         self._canonical_text = self.text
         full_cursor = self.cursor_location
         self.read_only = True
@@ -1253,6 +1286,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self._build_fold_regions()
         self._apply_fold_projection(full_cursor)
         self.selection = Selection.cursor(self.cursor_location)
+        self._restore_cursor_viewport_position(viewport_position)
         self.post_message(self.ModeChanged())
 
     def action_exit_edit(self) -> None:
@@ -2550,6 +2584,7 @@ class ViewerApp(App[None]):
         clipboard_writer: ClipboardWriter = copy_to_system_clipboard,
         source_writer: SourceWriter = save_text_file,
         annotation_store: Optional[AnnotationStore] = None,
+        initial_source_cursor: Optional[tuple[int, int]] = None,
     ) -> None:
         super().__init__()
         self.source = source
@@ -2557,6 +2592,9 @@ class ViewerApp(App[None]):
         self.soft_wrap = soft_wrap
         self._clipboard_writer = clipboard_writer
         self._source_writer = source_writer
+        self.initial_source_cursor = initial_source_cursor
+        self.exit_source_cursor: Optional[tuple[int, int]] = None
+        self.quit_completed = False
         self.last_copy_backend: Optional[str] = None
         self._pane_switch_pending = False
         self._pane_switch_timer: Optional[Timer] = None
@@ -2636,13 +2674,19 @@ class ViewerApp(App[None]):
     def on_mount(self) -> None:
         self.query_one("#viewer", VimTextArea).focus()
         self._refresh_status()
-        self.call_after_refresh(self._align_annotation_to_source)
+        self.call_after_refresh(self._restore_initial_source_cursor)
         if self._demo_case_error is not None:
             self.notify(
                 self._demo_case_error,
                 severity="warning",
                 timeout=6,
             )
+
+    def _restore_initial_source_cursor(self) -> None:
+        viewer = self.query_one("#viewer", VimTextArea)
+        if self.initial_source_cursor is not None:
+            viewer.move_cursor(self.initial_source_cursor, center=True)
+        self._align_annotation_to_source()
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -3364,6 +3408,7 @@ class ViewerApp(App[None]):
                 disk_source.text,
                 choices,
                 rematched_at=rematched_at,
+                pdf_document=disk_source.pdf_document,
             )
             saved, backup_path = self.annotation_store.transactional_write(
                 updated,
@@ -3373,6 +3418,7 @@ class ViewerApp(App[None]):
                     written,
                     disk_source.text,
                     choices,
+                    pdf_document=disk_source.pdf_document,
                 ),
             )
         except (AnnotationFileError, ValueError) as error:
@@ -3401,7 +3447,13 @@ class ViewerApp(App[None]):
             f" Backup: {backup_path.name}." if backup_path is not None else ""
         )
         self.notify(
-            f"Rematched {len(choices)} annotation(s).{backup_message}",
+            f"Rematched {len(choices)} annotation(s)."
+            + (
+                " PDF anchors refreshed."
+                if disk_source.pdf_document is not None
+                else ""
+            )
+            + backup_message,
             timeout=5,
         )
 
@@ -3495,7 +3547,7 @@ class ViewerApp(App[None]):
     def _request_quit(self) -> None:
         dirty_panes = self._dirty_panes()
         if not dirty_panes:
-            self.exit()
+            self._complete_quit()
             return
         self.push_screen(
             QuitChangesModal(dirty_panes),
@@ -3507,10 +3559,18 @@ class ViewerApp(App[None]):
             self._refresh_status()
             return
         if choice == "discard":
-            self.exit()
+            self._complete_quit()
             return
         if self._save_dirty_changes():
-            self.exit()
+            self._complete_quit()
+
+    def _complete_quit(self) -> None:
+        """Capture resumable state only after the quit decision is complete."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        self.exit_source_cursor = viewer.cursor_location
+        self.quit_completed = True
+        self.exit()
 
     def _save_dirty_changes(self) -> bool:
         viewer = self.query_one("#viewer", VimTextArea)

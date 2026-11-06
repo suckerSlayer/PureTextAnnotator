@@ -105,6 +105,9 @@ Recommended details:
 - Missing anchor fields are allowed, so all existing sidecars remain usable.
 - Notes, stable IDs, and creation timestamps are never used as text-match
   evidence and are never rewritten by matching.
+- For PDF sources, a confirmed rematch also replaces `pdf_anchor` with geometry
+  computed from the current PDF. If geometry is unavailable, stale PDF anchor
+  data is removed so embedding fails closed.
 
 ## 4. Read-only mismatch detection
 
@@ -330,8 +333,11 @@ After explicit confirmation:
    - preserve the stable ID, note, type, and original creation time;
    - record rematch history, including old range, method, displayed confidence,
      and rematch time.
+   - for a PDF, regenerate the selected record's document hash, page fragments,
+     page-local ranges, boxes, rotation, rectangle, and highlight quads.
 5. Leave skipped, ambiguous, malformed, and orphaned annotations unchanged.
-6. Validate every rewritten range and quotation against the current source.
+6. Validate every rewritten range and quotation against the current source; for
+   PDF records, also recompute and compare the complete geometry anchor.
 7. Atomically replace the sidecar.
 8. Reparse the written file and verify IDs, notes, ranges, and counts.
 9. On any failure, retain or restore the backup and report that no complete
@@ -463,6 +469,8 @@ At minimum, automated tests must cover:
 15. prompt displays per-item and batch confidence information;
 16. backup and rollback survive an injected write failure;
 17. IDs, notes, and creation times remain unchanged after rematch.
+18. replacing a PDF and moving a quote to another page regenerates the document
+    hash and page geometry, and the rematched sidecar exports successfully.
 
 Evaluation should prioritize precision over recall: leaving an annotation
 unresolved is safer than confidently attaching it to the wrong text.
@@ -483,6 +491,8 @@ The recommended choices were approved and implemented:
    **Implemented**
 9. Record rematch history inside annotation metadata. **Implemented**
 10. Keep semantic/AI matching out of the first release. **Implemented**
+11. Regenerate and validate PDF geometry anchors during confirmed PDF rematches;
+    remove stale geometry when no PDF document is available. **Implemented**
 
 Implementation approval never authorizes applying a rematch to user data. Every
 real Apply operation still requires the confidence-bearing confirmation prompt.
