@@ -184,6 +184,39 @@ The command should report a stale hash or geometry error and create no output.
 It must also reject `--output output/pdf/pta-text-layer-manual-test.pdf`, even
 when `--force` is supplied.
 
+## Case 9 Reopen through the PDF extraction cache
+
+Force one complete extraction, wait for the viewer, and then quit:
+
+```bash
+pta-view --rebuild-pdf-cache output/pdf/pta-text-layer-manual-test.pdf
+```
+
+Open the same PDF normally:
+
+```bash
+pta-view output/pdf/pta-text-layer-manual-test.pdf
+```
+
+Expected results:
+
+- The second launch reuses cached canonical text and geometry and should reach
+  the viewer more quickly.
+- Text, page headings, search results, selection, and annotation geometry are
+  identical to the rebuilt result.
+- The PDF and sidecar remain unchanged.
+
+For comparison, `--no-pdf-cache` forces extraction without reading or writing
+the cache:
+
+```bash
+pta-view --no-pdf-cache output/pdf/pta-text-layer-manual-test.pdf
+```
+
+Changing any PDF byte, changing the extraction profile or `pdfplumber` version,
+or corrupting the cache must also trigger safe re-extraction. A cache read or
+write failure must never prevent the PDF from opening.
+
 ## Pass checklist
 
 | Check | Expected |
@@ -200,3 +233,5 @@ when `--force` is supplied.
 | Cross-page note creates one highlight on each source page | Pass |
 | Existing output and stale geometry fail closed | Pass |
 | Source PDF and sidecar remain byte-for-byte unchanged | Pass |
+| Unchanged PDF reopens from the exact-hash extraction cache | Pass |
+| Changed or corrupt cache data falls back to extraction | Pass |

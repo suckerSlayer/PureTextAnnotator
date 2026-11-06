@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -11,6 +13,7 @@ from pure_text_annotator.annotations import (
     create_record,
     parse_annotation_ranges,
 )
+from pure_text_annotator import pdfs
 from pure_text_annotator.app import (
     AnnotationTextArea,
     EditWarningModal,
@@ -18,9 +21,147 @@ from pure_text_annotator.app import (
     ViewerApp,
     VimTextArea,
 )
+from pure_text_annotator.cli import build_parser
 from pure_text_annotator.files import TextFileError, load_source_file, save_text_file
+from pure_text_annotator.pdfs import load_pdf_file, pdf_cache_path
 
 from pdf_fixtures import write_text_pdf
+
+
+def test_pdf_cache_reuses_exact_text_and_geometry(tmp_path: Path) -> None:
+    pdf_path = write_text_pdf(
+        tmp_path / "cached.pdf",
+        ("Alpha beta gamma", "Delta epsilon"),
+    )
+    cache_dir = tmp_path / "cache"
+
+    first = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    cache_path = pdf_cache_path(digest, cache_dir)
+    assert cache_path.is_file()
+    if os.name != "nt":
+        assert cache_path.stat().st_mode & 0o777 == 0o600
+
+    with patch.object(
+        pdfs.pdfplumber,
+        "open",
+        side_effect=AssertionError("cache hit invoked pdfplumber"),
+    ):
+        second = load_pdf_file(pdf_path, cache_dir=cache_dir)
+
+    assert second.text == first.text
+    assert second.pdf_document == first.pdf_document
+    assert second.pdf_document is not None
+    start = second.text.index("beta")
+    assert second.pdf_document.anchor_for_range(
+        start, start + len("beta")
+    ) == first.pdf_document.anchor_for_range(start, start + len("beta"))
+
+
+def test_pdf_cache_misses_when_pdf_bytes_change(tmp_path: Path) -> None:
+    pdf_path = write_text_pdf(tmp_path / "changed.pdf", ("Original words",))
+    cache_dir = tmp_path / "cache"
+    first = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    original_stat = pdf_path.stat()
+
+    write_text_pdf(pdf_path, ("Modified words",))
+    assert pdf_path.stat().st_size == original_stat.st_size
+    os.utime(
+        pdf_path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    with patch.object(
+        pdfs.pdfplumber, "open", wraps=pdfs.pdfplumber.open
+    ) as extractor:
+        second = load_pdf_file(pdf_path, cache_dir=cache_dir)
+
+    assert extractor.call_count == 1
+    assert first.pdf_document is not None
+    assert second.pdf_document is not None
+    assert first.pdf_document.document_sha256 != second.pdf_document.document_sha256
+    assert "Modified words" in second.text
+    assert len(tuple(cache_dir.glob("*.pta-pdf-cache.gz"))) == 2
+
+
+def test_corrupt_pdf_cache_is_rebuilt(tmp_path: Path) -> None:
+    pdf_path = write_text_pdf(tmp_path / "corrupt.pdf", ("Alpha beta",))
+    cache_dir = tmp_path / "cache"
+    first = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    assert first.pdf_document is not None
+    cache_path = pdf_cache_path(first.pdf_document.document_sha256, cache_dir)
+    cache_path.write_bytes(b"not a valid cache")
+
+    with patch.object(
+        pdfs.pdfplumber, "open", wraps=pdfs.pdfplumber.open
+    ) as extractor:
+        rebuilt = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    assert extractor.call_count == 1
+    assert rebuilt.text == first.text
+
+    with patch.object(
+        pdfs.pdfplumber,
+        "open",
+        side_effect=AssertionError("rebuilt cache was not used"),
+    ):
+        cached = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    assert cached.pdf_document == first.pdf_document
+
+
+def test_rebuild_and_disable_pdf_cache_controls(tmp_path: Path) -> None:
+    pdf_path = write_text_pdf(tmp_path / "controls.pdf", ("Alpha beta",))
+    cache_dir = tmp_path / "cache"
+    first = load_pdf_file(pdf_path, cache_dir=cache_dir)
+
+    with patch.object(
+        pdfs.pdfplumber, "open", wraps=pdfs.pdfplumber.open
+    ) as extractor:
+        rebuilt = load_pdf_file(
+            pdf_path, cache_dir=cache_dir, rebuild_cache=True
+        )
+    assert extractor.call_count == 1
+    assert rebuilt.pdf_document == first.pdf_document
+
+    other_cache = tmp_path / "disabled-cache"
+    load_pdf_file(pdf_path, cache_dir=other_cache, use_cache=False)
+    assert not other_cache.exists()
+
+
+def test_pdf_cache_profile_change_and_write_failure_fall_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = write_text_pdf(tmp_path / "profile.pdf", ("Alpha beta",))
+    cache_dir = tmp_path / "cache"
+    first = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    assert first.pdf_document is not None
+
+    monkeypatch.setattr(pdfs, "EXTRACTION_PROFILE", "pta-canonical-test-v2")
+    with patch.object(
+        pdfs.pdfplumber, "open", wraps=pdfs.pdfplumber.open
+    ) as extractor:
+        changed_profile = load_pdf_file(pdf_path, cache_dir=cache_dir)
+    assert extractor.call_count == 1
+    assert changed_profile.pdf_document is not None
+    assert changed_profile.pdf_document.extraction_profile == "pta-canonical-test-v2"
+
+    blocked_cache = tmp_path / "not-a-directory"
+    blocked_cache.write_text("cache writes are unavailable", encoding="utf-8")
+    uncached = load_pdf_file(pdf_path, cache_dir=blocked_cache)
+    assert uncached.text == first.text
+
+
+def test_pdf_cache_cli_controls_are_mutually_exclusive() -> None:
+    parser = build_parser()
+    disabled = parser.parse_args(["--no-pdf-cache", "paper.pdf"])
+    rebuilt = parser.parse_args(["--rebuild-pdf-cache", "paper.pdf"])
+
+    assert disabled.no_pdf_cache is True
+    assert disabled.rebuild_pdf_cache is False
+    assert rebuilt.no_pdf_cache is False
+    assert rebuilt.rebuild_pdf_cache is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["--no-pdf-cache", "--rebuild-pdf-cache", "paper.pdf"]
+        )
 
 
 def test_load_pdf_builds_canonical_pages_and_geometry(tmp_path: Path) -> None:

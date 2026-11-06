@@ -16,6 +16,7 @@ env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.pta-pdf-cache.gz
 .mypy_cache/
 .ruff_cache/
 .pytype/

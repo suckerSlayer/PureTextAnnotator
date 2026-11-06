@@ -84,7 +84,13 @@ def load_text_file(path_input: PathInput) -> LoadedTextFile:
     )
 
 
-def load_source_file(path_input: PathInput) -> LoadedTextFile:
+def load_source_file(
+    path_input: PathInput,
+    *,
+    use_pdf_cache: bool = True,
+    rebuild_pdf_cache: bool = False,
+    pdf_cache_dir: Optional[PathInput] = None,
+) -> LoadedTextFile:
     """Load a supported text/Markdown file or a text-layer PDF."""
 
     path = Path(path_input).expanduser()
@@ -93,7 +99,12 @@ def load_source_file(path_input: PathInput) -> LoadedTextFile:
         # Keep the optional extraction dependency out of the plain-text path.
         from .pdfs import load_pdf_file
 
-        return load_pdf_file(path)
+        return load_pdf_file(
+            path,
+            use_cache=use_pdf_cache,
+            rebuild_cache=rebuild_pdf_cache,
+            cache_dir=pdf_cache_dir,
+        )
     if suffix in SUPPORTED_TEXT_SUFFIXES:
         return load_text_file(path)
     supported = ", ".join(sorted(SUPPORTED_SOURCE_SUFFIXES))

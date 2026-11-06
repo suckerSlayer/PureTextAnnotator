@@ -56,6 +56,37 @@ Multi-page selections create one geometry fragment per page. Coordinates use
 PDF user space with a bottom-left origin. Geometry is valid only for the exact
 recorded PDF hash.
 
+### PDF extraction cache
+
+The first opening still performs complete text and character-geometry
+extraction. Pure Text Annotator then stores a compressed cache in the operating
+system's user-cache directory. On later openings it reads and hashes the PDF,
+then reuses the cached canonical text, page metadata, and geometry only when all
+of these values match:
+
+- The SHA-256 of the complete PDF file.
+- The cache schema version.
+- The extraction profile.
+- The `pdfplumber` version.
+
+Changing even one PDF byte therefore causes a cache miss and a fresh
+extraction. A corrupt, missing, or unwritable cache is ignored safely; opening
+the PDF continues through the normal extraction path. Cache files use private
+permissions, are written atomically, and contain extracted document text, so
+they should be handled as private local data. Deleting them is safe because
+they can always be regenerated.
+
+Use these diagnostic controls when needed:
+
+```bash
+pta-view --rebuild-pdf-cache path/to/paper.pdf
+pta-view --no-pdf-cache path/to/paper.pdf
+python -c "from pure_text_annotator.pdfs import pdf_cache_directory; print(pdf_cache_directory())"
+```
+
+`PTA_PDF_CACHE_DIR` may be set to choose another cache directory. The cache is
+also used automatically when `pta-embed` verifies PDF geometry.
+
 Use `pta-embed` to write the sidecar notes as standard yellow `/Highlight`
 annotations in a separate PDF copy:
 
@@ -286,6 +317,7 @@ dimmed so the current note remains easy to identify.
 - UTF-8 input, including files with a UTF-8 byte-order mark
 - PDF source viewing, geometry-aware annotation, and safe highlight export;
   no OCR or rendered-page pane
+- Exact-hash PDF extraction caching for faster repeat opens
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
