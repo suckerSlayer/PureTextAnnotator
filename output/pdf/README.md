@@ -68,8 +68,8 @@ Expected results:
 - A warning says that PDF source text is an extracted read-only view.
 - The original PDF bytes are not changed.
 
-The annotation pane remains editable: press Tab, then `i`, and confirm that it
-enters Edit mode without the original-source warning.
+The annotation pane remains editable: press Ctrl+W, then `w`, then `i`, and
+confirm that it enters Edit mode without the original-source warning.
 
 ## Case 4 Create a single-page PDF annotation
 

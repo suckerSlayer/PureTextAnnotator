@@ -65,10 +65,12 @@ Movement
   h/j/k/l or arrows       move cursor
   w / b / e               next word / previous word / word end
   0 / $                   line start / line end
-  g / G                   document start / document end
+  gg / G                  document start / document end
+  [count]gg               jump to the numbered line
   Ctrl-F / Ctrl-B         page down / page up
   Ctrl-E / Ctrl-Y         scroll down / up one line
   zt / zz / zb            place cursor at top / middle / bottom
+  Ctrl-O / Ctrl-I (Tab)   older / newer pane-local jump
 
 Annotations
   Ctrl-N / Ctrl-P         next / previous annotation
@@ -89,7 +91,7 @@ Search, editing, and files
   Ctrl-W / Ctrl-H         delete previous word / character in Edit mode
   Ctrl-S                  save changes
   y or Ctrl-C / Cmd-C     copy selection
-  Tab or Ctrl-W w         switch panes
+  Ctrl-W w                switch panes
   q or Ctrl-Q             quit
 """
 
@@ -246,6 +248,180 @@ def _position_cursor_line(text_area: TextArea, placement: str) -> None:
 class HalfPageBottomScrollTextArea(TextArea):
     """A text area with enough trailing space to center its final line."""
 
+    class CommandStateChanged(Message):
+        """Posted when a Vim count or ``g`` prefix changes."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._jump_back_stack: list[tuple[int, int]] = []
+        self._jump_forward_stack: list[tuple[int, int]] = []
+        self._vim_count_digits = ""
+        self._vim_g_pending = False
+
+    @property
+    def vim_command_text(self) -> str:
+        """Return the pending count and ``g`` prefix for status display."""
+
+        return self._vim_count_digits + ("g" if self._vim_g_pending else "")
+
+    @property
+    def jump_back_stack(self) -> tuple[tuple[int, int], ...]:
+        """Expose older jump positions for diagnostics and tests."""
+
+        return tuple(self._jump_back_stack)
+
+    @property
+    def jump_forward_stack(self) -> tuple[tuple[int, int], ...]:
+        """Expose newer jump positions for diagnostics and tests."""
+
+        return tuple(self._jump_forward_stack)
+
+    def _jump_history_location(self) -> tuple[int, int]:
+        """Capture one pane-local position for the jumplist."""
+
+        return self.cursor_location
+
+    def _restore_jump_history_location(
+        self, location: tuple[int, int]
+    ) -> None:
+        """Restore a pane-local jumplist position and center it."""
+
+        self.move_cursor(location, center=True)
+
+    def _append_jump_position(
+        self,
+        stack: list[tuple[int, int]],
+        location: tuple[int, int],
+    ) -> None:
+        if not stack or stack[-1] != location:
+            stack.append(location)
+            del stack[:-100]
+
+    def move_cursor_with_jump(
+        self,
+        location: tuple[int, int],
+        *,
+        center: bool = True,
+        select: bool = False,
+    ) -> bool:
+        """Move to ``location`` while recording the position being left."""
+
+        if location == self.cursor_location:
+            return False
+        self._append_jump_position(
+            self._jump_back_stack,
+            self._jump_history_location(),
+        )
+        self._jump_forward_stack.clear()
+        self.move_cursor(location, center=center, select=select)
+        return True
+
+    def jump_back(self) -> bool:
+        """Move to the previous position in this pane's independent jumplist."""
+
+        current = self._jump_history_location()
+        while self._jump_back_stack:
+            destination = self._jump_back_stack.pop()
+            if destination == current:
+                continue
+            self._append_jump_position(self._jump_forward_stack, current)
+            self._restore_jump_history_location(destination)
+            return True
+        return False
+
+    def jump_forward(self) -> bool:
+        """Move to the next position in this pane's independent jumplist."""
+
+        current = self._jump_history_location()
+        while self._jump_forward_stack:
+            destination = self._jump_forward_stack.pop()
+            if destination == current:
+                continue
+            self._append_jump_position(self._jump_back_stack, current)
+            self._restore_jump_history_location(destination)
+            return True
+        return False
+
+    def clear_jump_history(self) -> None:
+        """Discard both directions of this pane's jumplist."""
+
+        self._jump_back_stack.clear()
+        self._jump_forward_stack.clear()
+
+    def cancel_vim_command(self) -> None:
+        """Clear a pending count or incomplete ``g`` command."""
+
+        if not self.vim_command_text:
+            return
+        self._vim_count_digits = ""
+        self._vim_g_pending = False
+        self.post_message(self.CommandStateChanged())
+
+    def action_vim_count_digit(self, digit: int) -> None:
+        """Accumulate a Normal-mode line count before ``gg``."""
+
+        if self._vim_g_pending:
+            self.cancel_vim_command()
+        if len(self._vim_count_digits) < 9:
+            self._vim_count_digits += str(digit)
+            self.post_message(self.CommandStateChanged())
+
+    def action_vim_zero_or_line_start(self) -> None:
+        """Append zero to a count, or perform Vim's standalone ``0`` motion."""
+
+        if self._vim_count_digits and not self._vim_g_pending:
+            if len(self._vim_count_digits) < 9:
+                self._vim_count_digits += "0"
+                self.post_message(self.CommandStateChanged())
+            return
+        self.cancel_vim_command()
+        self.action_cursor_line_start(
+            bool(getattr(self, "visual_mode", False))
+        )
+
+    def action_vim_goto_prefix(self) -> None:
+        """Wait for a second ``g``, then jump to line one or a counted line."""
+
+        if not self._vim_g_pending:
+            self._vim_g_pending = True
+            self.post_message(self.CommandStateChanged())
+            return
+        line_number = int(self._vim_count_digits or "1")
+        self._vim_count_digits = ""
+        self._vim_g_pending = False
+        self.post_message(self.CommandStateChanged())
+        row = max(0, min(line_number - 1, self.document.line_count - 1))
+        self.move_cursor_with_jump(
+            (row, 0),
+            select=bool(getattr(self, "visual_mode", False)),
+        )
+
+    def action_vim_document_end(self) -> None:
+        """Jump to the document end, or to a counted line like Vim's ``G``."""
+
+        count = int(self._vim_count_digits) if self._vim_count_digits else None
+        self.cancel_vim_command()
+        destination = self.document.end
+        if count is not None:
+            row = max(0, min(count - 1, self.document.line_count - 1))
+            destination = (row, 0)
+        self.move_cursor_with_jump(
+            destination,
+            select=bool(getattr(self, "visual_mode", False)),
+        )
+
+    def action_vim_line_start(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_line_start(
+            bool(getattr(self, "visual_mode", False))
+        )
+
+    def action_vim_line_end(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_line_end(
+            bool(getattr(self, "visual_mode", False))
+        )
+
     def _refresh_size(self) -> None:
         if self.soft_wrap:
             base_size = Size(0, self.wrapped_document.height)
@@ -285,9 +461,19 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
         Binding("b,ctrl+left", "vim_word_left", "Previous word", show=False),
         Binding("e", "vim_word_end", "End of word", show=False),
-        Binding("0,home", "vim_line_start", "Line start", show=False),
+        *[
+            Binding(
+                str(digit),
+                f"vim_count_digit({digit})",
+                "Line count",
+                show=False,
+            )
+            for digit in range(1, 10)
+        ],
+        Binding("0", "vim_zero_or_line_start", "Count or line start", show=False),
+        Binding("home", "vim_line_start", "Line start", show=False),
         Binding("$,end", "vim_line_end", "Line end", show=False),
-        Binding("g", "vim_document_start", "Document start", show=False),
+        Binding("g", "vim_goto_prefix", "Go-to prefix", show=False),
         Binding("G,shift+g", "vim_document_end", "Document end", show=False),
         Binding(
             "pagedown,ctrl+f,ctrl+d", "vim_page_down", "Page down", show=False
@@ -555,9 +741,11 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             "vim_word_left",
             "vim_word_right",
             "vim_word_end",
+            "vim_count_digit",
+            "vim_zero_or_line_start",
+            "vim_goto_prefix",
             "vim_line_start",
             "vim_line_end",
-            "vim_document_start",
             "vim_document_end",
             "vim_page_down",
             "vim_page_up",
@@ -577,45 +765,47 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         return super().check_action(action, parameters)
 
     def action_vim_left(self, force_select: bool = False) -> None:
+        self.cancel_vim_command()
         self.action_cursor_left(self._should_select(force_select))
 
     def action_vim_right(self, force_select: bool = False) -> None:
+        self.cancel_vim_command()
         self.action_cursor_right(self._should_select(force_select))
 
     def action_vim_up(self, force_select: bool = False) -> None:
+        self.cancel_vim_command()
         self.action_cursor_up(self._should_select(force_select))
 
     def action_vim_down(self, force_select: bool = False) -> None:
+        self.cancel_vim_command()
         self.action_cursor_down(self._should_select(force_select))
 
     def action_vim_word_left(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(
             _vim_word_previous_location(self), select=self.visual_mode
         )
 
     def action_vim_word_right(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(
             _vim_word_start_location(self), select=self.visual_mode
         )
 
     def action_vim_word_end(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(
             _vim_word_end_location(self), select=self.visual_mode
         )
 
     def action_vim_line_start(self) -> None:
-        self.action_cursor_line_start(self.visual_mode)
+        super().action_vim_line_start()
 
     def action_vim_line_end(self) -> None:
-        self.action_cursor_line_end(self.visual_mode)
-
-    def action_vim_document_start(self) -> None:
-        self.move_cursor((0, 0), select=self.visual_mode)
-
-    def action_vim_document_end(self) -> None:
-        self.move_cursor(self.document.end, select=self.visual_mode)
+        super().action_vim_line_end()
 
     def _move_page(self, *, down: bool, force_select: bool = False) -> None:
+        self.cancel_vim_command()
         selecting = self._should_select(force_select)
         anchor = self.selection.start
         if down:
@@ -632,12 +822,15 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         self._move_page(down=False, force_select=force_select)
 
     def action_vim_scroll_down_line(self) -> None:
+        self.cancel_vim_command()
         _vim_scroll_line(self, 1, select=self.visual_mode)
 
     def action_vim_scroll_up_line(self) -> None:
+        self.cancel_vim_command()
         _vim_scroll_line(self, -1, select=self.visual_mode)
 
     def action_toggle_visual(self) -> None:
+        self.cancel_vim_command()
         if self.visual_mode:
             self.action_cancel_visual()
             return
@@ -646,12 +839,15 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         self.post_message(self.ModeChanged())
 
     def action_annotate(self) -> None:
+        self.cancel_vim_command()
         self.post_message(self.AnnotationRequested(self.selection))
 
     def action_request_edit(self) -> None:
+        self.cancel_vim_command()
         self.post_message(self.EditRequested())
 
     def action_vim_undo(self) -> None:
+        self.cancel_vim_command()
         previous_text = self.text
         self._normal_history_pending = True
         self.undo()
@@ -659,6 +855,7 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             self._normal_history_pending = False
 
     def action_vim_redo(self) -> None:
+        self.cancel_vim_command()
         previous_text = self.text
         self._normal_history_pending = True
         self.redo()
@@ -688,6 +885,7 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         self.post_message(self.ModeChanged())
 
     def action_exit_edit(self) -> None:
+        self.cancel_vim_command()
         if self.edit_mode:
             self.leave_edit_mode()
         else:
@@ -705,9 +903,11 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             self.action_cancel_visual()
 
     def action_yank(self) -> None:
+        self.cancel_vim_command()
         self._request_copy(clear_after=True)
 
     def action_copy_selection(self) -> None:
+        self.cancel_vim_command()
         self._request_copy(clear_after=False)
 
 
@@ -728,6 +928,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         "text-area--active-annotation",
         "text-area--annotation-quote",
         "text-area--annotation-meta",
+        "text-area--annotation-subtitle",
         "text-area--inactive-annotation",
         "text-area--search-match",
     }
@@ -735,10 +936,10 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
     edit_mode = reactive(False)
 
     BINDINGS = [
-        Binding("h,left", "cursor_left", "Left", show=False),
-        Binding("j,down", "cursor_down", "Down", show=False),
-        Binding("k,up", "cursor_up", "Up", show=False),
-        Binding("l,right", "cursor_right", "Right", show=False),
+        Binding("h,left", "vim_left", "Left", show=False),
+        Binding("j,down", "vim_down", "Down", show=False),
+        Binding("k,up", "vim_up", "Up", show=False),
+        Binding("l,right", "vim_right", "Right", show=False),
         Binding("w,ctrl+right", "vim_word_right", "Next word", show=False),
         Binding("b,ctrl+left", "vim_word_left", "Previous word", show=False),
         Binding("e", "vim_word_end", "End of word", show=False),
@@ -752,15 +953,25 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
             show=False,
         ),
         Binding("ctrl+h", "delete_left", "Delete left", show=False),
-        Binding("0,home", "cursor_line_start", "Line start", show=False),
-        Binding("$,end", "cursor_line_end", "Line end", show=False),
-        Binding("g", "document_start", "Document start", show=False),
-        Binding("G,shift+g", "document_end", "Document end", show=False),
+        *[
+            Binding(
+                str(digit),
+                f"vim_count_digit({digit})",
+                "Line count",
+                show=False,
+            )
+            for digit in range(1, 10)
+        ],
+        Binding("0", "vim_zero_or_line_start", "Count or line start", show=False),
+        Binding("home", "vim_line_start", "Line start", show=False),
+        Binding("$,end", "vim_line_end", "Line end", show=False),
+        Binding("g", "vim_goto_prefix", "Go-to prefix", show=False),
+        Binding("G,shift+g", "vim_document_end", "Document end", show=False),
         Binding(
-            "pagedown,ctrl+f,ctrl+d", "cursor_page_down", "Page down", show=False
+            "pagedown,ctrl+f,ctrl+d", "vim_page_down", "Page down", show=False
         ),
         Binding(
-            "pageup,ctrl+b,ctrl+u", "cursor_page_up", "Page up", show=False
+            "pageup,ctrl+b,ctrl+u", "vim_page_up", "Page up", show=False
         ),
         Binding(
             "ctrl+e", "vim_scroll_down_line", "Scroll down", show=False
@@ -795,6 +1006,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self._annotation_links_by_line: dict[int, AnnotationLink] = {}
         self._metadata_lines: frozenset[int] = frozenset()
         self._quote_lines: frozenset[int] = frozenset()
+        self._subtitle_lines: frozenset[int] = frozenset()
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
         self._normal_history_pending = False
         self._canonical_text = text
@@ -811,19 +1023,21 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self, action: str, parameters: tuple[object, ...]
     ) -> bool | None:
         normal_mode_actions = {
-            "cursor_left",
-            "cursor_right",
-            "cursor_up",
-            "cursor_down",
+            "vim_left",
+            "vim_right",
+            "vim_up",
+            "vim_down",
             "vim_word_left",
             "vim_word_right",
             "vim_word_end",
-            "cursor_line_start",
-            "cursor_line_end",
-            "document_start",
-            "document_end",
-            "cursor_page_down",
-            "cursor_page_up",
+            "vim_count_digit",
+            "vim_zero_or_line_start",
+            "vim_goto_prefix",
+            "vim_line_start",
+            "vim_line_end",
+            "vim_document_end",
+            "vim_page_down",
+            "vim_page_up",
             "vim_scroll_down_line",
             "vim_scroll_up_line",
             "request_edit",
@@ -871,6 +1085,22 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
     def _full_cursor_location(self) -> tuple[int, int]:
         row, column = self.cursor_location
         return self.full_line_for_display(row), column
+
+    def _jump_history_location(self) -> tuple[int, int]:
+        """Store canonical sidecar rows so folds do not corrupt history."""
+
+        return self._full_cursor_location()
+
+    def _restore_jump_history_location(
+        self, location: tuple[int, int]
+    ) -> None:
+        full_row, column = location
+        display_row = self._display_line_for_full(full_row)
+        line = self.text.split("\n")[display_row] if self.text else ""
+        self.move_cursor(
+            (display_row, min(column, len(line))),
+            center=True,
+        )
 
     def _cursor_viewport_position(self) -> tuple[float, float]:
         """Capture horizontal scroll and the cursor's visual viewport row."""
@@ -954,11 +1184,13 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         links_by_line: dict[int, AnnotationLink] = {}
         metadata_lines: set[int] = set()
         quote_lines: set[int] = set()
+        subtitle_lines: set[int] = set()
         canonical_lines = self._canonical_text.split("\n")
 
         full_links_by_line: dict[int, AnnotationLink] = {}
         full_metadata_lines: set[int] = set()
         full_quote_lines: set[int] = set()
+        full_subtitle_lines: set[int] = set()
 
         if canonical_lines and canonical_lines[0].strip() == "---":
             for line_number in range(1, len(canonical_lines)):
@@ -996,6 +1228,16 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
                         link.sidecar_quote_end_line + 1,
                     )
                 )
+            full_subtitle_lines.update(
+                line_number
+                for line_number in range(
+                    link.sidecar_start_line,
+                    link.sidecar_end_line + 1,
+                )
+                if 0 <= line_number < len(canonical_lines)
+                and canonical_lines[line_number].strip()
+                in {"### Original text", "### Note"}
+            )
 
         for display_line, full_line in enumerate(self._display_to_full_lines):
             link = full_links_by_line.get(full_line)
@@ -1005,10 +1247,13 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
                 metadata_lines.add(display_line)
             if full_line in full_quote_lines:
                 quote_lines.add(display_line)
+            if full_line in full_subtitle_lines:
+                subtitle_lines.add(display_line)
 
         self._annotation_links_by_line = links_by_line
         self._metadata_lines = frozenset(metadata_lines)
         self._quote_lines = frozenset(quote_lines)
+        self._subtitle_lines = frozenset(subtitle_lines)
         self._line_cache.clear()
         self.refresh()
 
@@ -1072,6 +1317,8 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
     def load_annotation_text(self, text: str) -> None:
         """Load a new canonical sidecar and reset its edit history."""
 
+        self.clear_jump_history()
+        self.cancel_vim_command()
         self._canonical_text = text
         self._fold_regions = ()
         self._display_is_projection = False
@@ -1156,7 +1403,13 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self._build_fold_regions()
         self._apply_fold_projection(full_cursor)
 
-    def show_link(self, link: AnnotationLink, *, move_cursor: bool) -> None:
+    def show_link(
+        self,
+        link: AnnotationLink,
+        *,
+        move_cursor: bool,
+        record_jump: bool = False,
+    ) -> None:
         """Mark an annotation block and optionally center its first line."""
 
         changed = link != self._active_link
@@ -1166,7 +1419,10 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
             self.refresh()
         target_line = self._display_line_for_full(link.sidecar_note_line)
         if move_cursor and self.cursor_location[0] != target_line:
-            self.move_cursor((target_line, 0), center=True)
+            if record_jump:
+                self.move_cursor_with_jump((target_line, 0), center=True)
+            else:
+                self.move_cursor((target_line, 0), center=True)
 
     def clear_active_link(self) -> None:
         """Remove the active-entry marker when no valid annotations exist."""
@@ -1213,6 +1469,12 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
                 line.stylize(
                     self.get_component_rich_style("text-area--annotation-quote")
                 )
+            if line_index in self._subtitle_lines:
+                line.stylize(
+                    self.get_component_rich_style(
+                        "text-area--annotation-subtitle"
+                    )
+                )
             link = self._active_link
             if (
                 link is not None
@@ -1232,31 +1494,56 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
             line.stylize(search_style, start, end)
         return line
 
-    def action_document_start(self) -> None:
-        self.move_cursor((0, 0))
+    def action_vim_left(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_left()
 
-    def action_document_end(self) -> None:
-        self.move_cursor(self.document.end)
+    def action_vim_right(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_right()
+
+    def action_vim_up(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_up()
+
+    def action_vim_down(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_down()
 
     def action_vim_word_end(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(_vim_word_end_location(self))
 
     def action_vim_word_right(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(_vim_word_start_location(self))
 
     def action_vim_word_left(self) -> None:
+        self.cancel_vim_command()
         self.move_cursor(_vim_word_previous_location(self))
 
+    def action_vim_page_down(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_page_down()
+
+    def action_vim_page_up(self) -> None:
+        self.cancel_vim_command()
+        self.action_cursor_page_up()
+
     def action_vim_scroll_down_line(self) -> None:
+        self.cancel_vim_command()
         _vim_scroll_line(self, 1)
 
     def action_vim_scroll_up_line(self) -> None:
+        self.cancel_vim_command()
         _vim_scroll_line(self, -1)
 
     def action_request_edit(self) -> None:
+        self.cancel_vim_command()
         self.post_message(self.EditRequested())
 
     def action_vim_undo(self) -> None:
+        self.cancel_vim_command()
         previous_text = self.canonical_text
         full_cursor = self._full_cursor_location()
         if self._display_is_projection:
@@ -1275,6 +1562,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self.set_annotation_links(parse_annotation_links(self._canonical_text))
 
     def action_vim_redo(self) -> None:
+        self.cancel_vim_command()
         previous_text = self.canonical_text
         full_cursor = self._full_cursor_location()
         if self._display_is_projection:
@@ -1326,6 +1614,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         self.post_message(self.ModeChanged())
 
     def action_exit_edit(self) -> None:
+        self.cancel_vim_command()
         self.leave_edit_mode()
 
 
@@ -1729,7 +2018,7 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     #annotation-menu-dialog {
         width: 96%;
         max-width: 120;
-        height: 13;
+        height: 17;
         margin-bottom: 1;
         padding: 0 1;
         border: round $accent;
@@ -1750,10 +2039,10 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     }
 
     #annotation-menu-buttons {
-        height: 7;
-        grid-size: 2 2;
-        grid-columns: 1fr 1fr;
-        grid-rows: 3 3;
+        height: 11;
+        grid-size: 3 3;
+        grid-columns: 1fr 1fr 1fr;
+        grid-rows: 3 3 3;
         grid-gutter: 1 1;
         margin-top: 1;
     }
@@ -1765,6 +2054,9 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     """
 
     BINDINGS = [
+        Binding("a", "add", "Add annotation", priority=True, show=False),
+        Binding("i", "edit", "Enter Edit mode", priority=True, show=False),
+        Binding("s", "sync", "Switch Sync mode", priority=True, show=False),
         Binding("d", "delete", "Delete current", priority=True, show=False),
         Binding("r", "rematch", "Rematch", priority=True, show=False),
         Binding("k", "keybindings", "Keybindings", priority=True, show=False),
@@ -1777,10 +2069,12 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
         current_label: Optional[str],
         *,
         is_pdf: bool,
+        sync_mode: SyncMode,
     ) -> None:
         super().__init__()
         self.current_label = current_label
         self.is_pdf = is_pdf
+        self.sync_mode = sync_mode
 
     def compose(self) -> ComposeResult:
         current = self.current_label or "No valid current annotation"
@@ -1796,6 +2090,18 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
                 id="annotation-menu-current",
             )
             with Grid(id="annotation-menu-buttons"):
+                yield Button(
+                    "A  Add annotation",
+                    id="menu-add-annotation",
+                )
+                yield Button(
+                    "I  Enter Edit mode",
+                    id="menu-enter-edit-mode",
+                )
+                yield Button(
+                    f"S  Switch Sync mode · {self.sync_mode.value}",
+                    id="menu-switch-sync-mode",
+                )
                 yield Button(
                     "D  Delete current annotation",
                     id="menu-delete-annotation",
@@ -1815,23 +2121,27 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
                     disabled=not self.is_pdf,
                 )
             yield Static(
-                "D/R/K/E chooses · Escape cancels · original PDFs are never "
-                "overwritten",
+                "A/I/S/D/R/K/E chooses · Escape cancels · original PDFs are "
+                "never overwritten",
                 markup=False,
                 id="annotation-menu-hint",
             )
 
     def on_mount(self) -> None:
-        button_id = (
-            "#menu-delete-annotation"
-            if self.current_label is not None
-            else "#menu-rematch-annotations"
-        )
-        self.query_one(button_id, Button).focus()
+        self.query_one("#menu-add-annotation", Button).focus()
 
     def action_delete(self) -> None:
         if self.current_label is not None:
             self.dismiss("delete")
+
+    def action_add(self) -> None:
+        self.dismiss("add")
+
+    def action_edit(self) -> None:
+        self.dismiss("edit")
+
+    def action_sync(self) -> None:
+        self.dismiss("sync")
 
     def action_rematch(self) -> None:
         self.dismiss("rematch")
@@ -1849,6 +2159,18 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     @on(Button.Pressed, "#menu-delete-annotation")
     def on_delete_pressed(self, _event: Button.Pressed) -> None:
         self.action_delete()
+
+    @on(Button.Pressed, "#menu-add-annotation")
+    def on_add_pressed(self, _event: Button.Pressed) -> None:
+        self.action_add()
+
+    @on(Button.Pressed, "#menu-enter-edit-mode")
+    def on_edit_pressed(self, _event: Button.Pressed) -> None:
+        self.action_edit()
+
+    @on(Button.Pressed, "#menu-switch-sync-mode")
+    def on_sync_pressed(self, _event: Button.Pressed) -> None:
+        self.action_sync()
 
     @on(Button.Pressed, "#menu-rematch-annotations")
     def on_rematch_pressed(self, _event: Button.Pressed) -> None:
@@ -2802,6 +3124,11 @@ class ViewerApp(App[None]):
         text-style: dim;
     }
 
+    #annotator .text-area--annotation-subtitle {
+        color: $text-muted;
+        text-style: dim;
+    }
+
     #annotator .text-area--inactive-annotation {
         color: $text-muted;
         text-style: dim;
@@ -2853,6 +3180,27 @@ class ViewerApp(App[None]):
             "ctrl+s",
             "save_changes",
             "Save changes",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "ctrl+o",
+            "jump_back",
+            "Previous jump",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "tab,ctrl+i",
+            "jump_forward",
+            "Next jump",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "shift+tab",
+            "ignore_tab",
+            "No pane switching",
             show=False,
             priority=True,
         ),
@@ -3100,9 +3448,10 @@ class ViewerApp(App[None]):
     def _normal_help_text(self) -> str:
         edit_hint = "i edit" if self.source.editable else "PDF source read-only"
         return (
-            f"Tab/Ctrl-W W panes  {edit_hint}  Ctrl-S save  R rematch  "
+            f"Ctrl-W W panes  {edit_hint}  Ctrl-S save  R rematch  "
             "Ctrl-N/P notes  m menu  S sync  . align  zi/zo/zc folds  "
-            "h/j/k/l move  Ctrl-E/Y scroll  zt/zz/zb place  "
+            "h/j/k/l move  gg/G/countgg jump  Ctrl-O/I history  "
+            "Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
             "a annotate  q quit"
         )
@@ -3170,6 +3519,7 @@ class ViewerApp(App[None]):
 
         target = self._focused_search_target()
         if isinstance(target, VimTextArea):
+            target.cancel_vim_command()
             ordered = tuple(
                 sorted(
                     links,
@@ -3223,7 +3573,7 @@ class ViewerApp(App[None]):
 
             if target.visual_mode:
                 target.action_cancel_visual()
-            target.move_cursor(
+            target.move_cursor_with_jump(
                 self._source_location_for_offset(
                     destination.source_range.start
                 ),
@@ -3236,6 +3586,7 @@ class ViewerApp(App[None]):
                     move_cursor=True,
                 )
         elif isinstance(target, AnnotationTextArea):
+            target.cancel_vim_command()
             ordered = tuple(sorted(links, key=lambda link: link.sidecar_start_line))
             full_line = target.full_line_for_display(target.cursor_location[0])
             current = next(
@@ -3277,7 +3628,11 @@ class ViewerApp(App[None]):
                     destination = ordered[0] if direction > 0 else ordered[-1]
                     wrapped = True
 
-            target.show_link(destination, move_cursor=True)
+            target.show_link(
+                destination,
+                move_cursor=True,
+                record_jump=True,
+            )
             if self.sync_mode is SyncMode.SYNC:
                 viewer = self.query_one("#viewer", VimTextArea)
                 viewer.set_active_annotation_range(destination.source_range)
@@ -3304,6 +3659,7 @@ class ViewerApp(App[None]):
     def action_open_annotation_menu(self) -> None:
         """Open the compact annotation action menu for the focused pane."""
 
+        self._cancel_focused_vim_command()
         if self._pane_switch_pending:
             self._clear_pane_switch_prefix()
         if self._scroll_position_pending:
@@ -3322,6 +3678,7 @@ class ViewerApp(App[None]):
             AnnotationMenuModal(
                 current_label,
                 is_pdf=self.source.source_kind == "pdf",
+                sync_mode=self.sync_mode,
             ),
             callback=self._finish_annotation_menu,
         )
@@ -3361,7 +3718,20 @@ class ViewerApp(App[None]):
             return
 
         self._pending_menu_link = None
-        if choice == "rematch":
+        if choice == "add":
+            viewer = self.query_one("#viewer", VimTextArea)
+            viewer.action_annotate()
+        elif choice == "edit":
+            target = (
+                self.query_one("#annotator", AnnotationTextArea)
+                if self._menu_focus_pane == "annotator"
+                else self.query_one("#viewer", VimTextArea)
+            )
+            target.focus()
+            target.action_request_edit()
+        elif choice == "sync":
+            self.action_cycle_sync_mode()
+        elif choice == "rematch":
             self.action_rematch_annotations()
         elif choice == "keybindings":
             self.push_screen(KeybindingsModal())
@@ -3542,7 +3912,7 @@ class ViewerApp(App[None]):
         row = bisect_right(self._source_line_starts, offset) - 1
         return row, offset - self._source_line_starts[row]
 
-    def _align_annotation_to_source(self) -> None:
+    def _align_annotation_to_source(self, *, record_jump: bool = False) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
         offset = location_to_offset(viewer.text, viewer.cursor_location)
@@ -3551,7 +3921,11 @@ class ViewerApp(App[None]):
             annotator.clear_active_link()
             viewer.set_active_annotation_range(None)
             return
-        annotator.show_link(link, move_cursor=True)
+        annotator.show_link(
+            link,
+            move_cursor=True,
+            record_jump=record_jump,
+        )
         viewer.set_active_annotation_range(link.source_range)
 
     def _focus_annotation_at_cursor(self) -> Optional[AnnotationLink]:
@@ -3568,7 +3942,7 @@ class ViewerApp(App[None]):
         annotator.show_link(link, move_cursor=False)
         return link
 
-    def _align_source_to_annotation(self) -> None:
+    def _align_source_to_annotation(self, *, record_jump: bool = False) -> None:
         link = self._focus_annotation_at_cursor()
         if link is None:
             return
@@ -3577,10 +3951,11 @@ class ViewerApp(App[None]):
         viewer.set_active_annotation_range(link.source_range)
         if viewer.visual_mode:
             viewer.action_cancel_visual()
-        viewer.move_cursor(
-            self._source_location_for_offset(link.source_range.start),
-            center=True,
-        )
+        destination = self._source_location_for_offset(link.source_range.start)
+        if record_jump:
+            viewer.move_cursor_with_jump(destination, center=True)
+        else:
+            viewer.move_cursor(destination, center=True)
 
     def _refresh_status(self) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
@@ -3617,6 +3992,12 @@ class ViewerApp(App[None]):
             if target is viewer and viewer.visual_mode
             else "NORMAL"
         )
+        command_info = (
+            f"  |  CMD {target.vim_command_text}"
+            if isinstance(target, HalfPageBottomScrollTextArea)
+            and target.vim_command_text
+            else ""
+        )
         selection_info = f"  |  {len(selected)} chars selected" if selected else ""
         dirty_panes = self._dirty_panes()
         modified_info = (
@@ -3626,7 +4007,7 @@ class ViewerApp(App[None]):
         self.query_one("#status", Static).update(
             f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
             f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}"
-            f"{selection_info}{modified_info}"
+            f"{command_info}{selection_info}{modified_info}"
         )
 
     def _focused_search_target(self) -> Optional[TextArea]:
@@ -3639,6 +4020,11 @@ class ViewerApp(App[None]):
         if annotator.has_focus:
             return annotator
         return None
+
+    def _cancel_focused_vim_command(self) -> None:
+        target = self._focused_search_target()
+        if isinstance(target, HalfPageBottomScrollTextArea):
+            target.cancel_vim_command()
 
     def _search_target(self, target_id: str) -> TextArea:
         """Resolve a stored pane identifier to its text area."""
@@ -3728,7 +4114,8 @@ class ViewerApp(App[None]):
         match = AnnotationRange(match_start, match_start + len(query))
         if isinstance(target, VimTextArea) and target.visual_mode:
             target.action_cancel_visual()
-        target.move_cursor(
+        target.cancel_vim_command()
+        target.move_cursor_with_jump(
             self._location_for_text_offset(text, match_start),
             center=True,
         )
@@ -3744,6 +4131,7 @@ class ViewerApp(App[None]):
         target = self._focused_search_target()
         if target is None or target.id is None:
             return
+        target.cancel_vim_command()
         if self._pane_switch_pending:
             self._clear_pane_switch_prefix()
         if self._scroll_position_pending:
@@ -3788,6 +4176,7 @@ class ViewerApp(App[None]):
     def action_cycle_sync_mode(self) -> None:
         """Cycle Normal, Sync, and Off cross-pane alignment modes."""
 
+        self._cancel_focused_vim_command()
         modes = (SyncMode.NORMAL, SyncMode.SYNC, SyncMode.OFF)
         current_index = modes.index(self.sync_mode)
         self.sync_mode = modes[(current_index + 1) % len(modes)]
@@ -3799,13 +4188,15 @@ class ViewerApp(App[None]):
 
         target = self._focused_search_target()
         if isinstance(target, VimTextArea):
-            self._align_annotation_to_source()
+            target.cancel_vim_command()
+            self._align_annotation_to_source(record_jump=True)
             _position_cursor_line(target, "middle")
             annotator = self.query_one("#annotator", AnnotationTextArea)
             if annotator.active_link is not None:
                 _position_cursor_line(annotator, "middle")
         elif isinstance(target, AnnotationTextArea):
-            self._align_source_to_annotation()
+            target.cancel_vim_command()
+            self._align_source_to_annotation(record_jump=True)
             _position_cursor_line(target, "middle")
             viewer = self.query_one("#viewer", VimTextArea)
             if target.active_link is not None:
@@ -3934,6 +4325,7 @@ class ViewerApp(App[None]):
     def action_rematch_annotations(self) -> None:
         """Run a read-only scan and open review when stale records exist."""
 
+        self._cancel_focused_vim_command()
         if self.demo_case is not None and not self._demo_reset_complete:
             self.push_screen(
                 DemoResetModal(self.demo_case),
@@ -4012,6 +4404,8 @@ class ViewerApp(App[None]):
         viewer.leave_edit_mode()
         annotator.leave_edit_mode()
         viewer.load_text(saved_source.text)
+        viewer.clear_jump_history()
+        viewer.cancel_vim_command()
         viewer.set_annotation_ranges(self.annotation_ranges)
         viewer.move_cursor((0, 0))
         annotator.load_annotation_text(saved_annotations)
@@ -4220,6 +4614,8 @@ class ViewerApp(App[None]):
         modal_open = isinstance(self.screen, ModalScreen)
         if action == "save_changes" and (modal_open or search_input.has_focus):
             return False
+        if action in {"jump_back", "jump_forward", "ignore_tab"} and modal_open:
+            return False
         if action in {"request_quit", "request_quit_force"} and modal_open:
             return False
         if action in {
@@ -4269,6 +4665,7 @@ class ViewerApp(App[None]):
     def action_save_changes(self) -> None:
         """Persist dirty source and annotation buffers without quitting."""
 
+        self._cancel_focused_vim_command()
         dirty_panes = self._dirty_panes()
         if not dirty_panes:
             self.notify("No changes to save", timeout=1.5)
@@ -4279,7 +4676,39 @@ class ViewerApp(App[None]):
                 timeout=2,
             )
 
+    def _jump_through_history(self, *, forward: bool) -> None:
+        """Move through only the focused pane's independent jumplist."""
+
+        target = self._focused_search_target()
+        if target is None:
+            return
+        target.cancel_vim_command()
+        if isinstance(target, VimTextArea) and target.visual_mode:
+            target.action_cancel_visual()
+        moved = target.jump_forward() if forward else target.jump_back()
+        if not moved:
+            direction = "newer" if forward else "older"
+            self.notify(
+                f"No {direction} jump position in this pane",
+                timeout=1.5,
+            )
+        self._refresh_status()
+
+    def action_jump_back(self) -> None:
+        self._jump_through_history(forward=False)
+
+    def action_jump_forward(self) -> None:
+        self._jump_through_history(forward=True)
+
+    def action_ignore_tab(self) -> None:
+        """Keep Shift+Tab from traversing between the two text panes."""
+
+        target = self._focused_search_target()
+        if target is not None:
+            target.cancel_vim_command()
+
     def _request_quit(self) -> None:
+        self._cancel_focused_vim_command()
         dirty_panes = self._dirty_panes()
         if not dirty_panes:
             self._complete_quit()
@@ -4409,6 +4838,7 @@ class ViewerApp(App[None]):
         self._refresh_status()
 
     def action_start_pane_switch(self) -> None:
+        self._cancel_focused_vim_command()
         if self._scroll_position_pending:
             self._clear_scroll_position_prefix()
         self._pane_switch_pending = True
@@ -4441,6 +4871,7 @@ class ViewerApp(App[None]):
     def action_scroll_position_prefix_or_middle(self) -> None:
         """Start a z command, or complete ``zz`` when already pending."""
 
+        self._cancel_focused_vim_command()
         if self._scroll_position_pending:
             self._finish_scroll_position("middle")
             return
@@ -4603,8 +5034,9 @@ class ViewerApp(App[None]):
     @on(TextArea.SelectionChanged, "#viewer")
     def on_viewer_selection_changed(self, _event: TextArea.SelectionChanged) -> None:
         self._clear_stale_search_match("viewer")
-        self._refresh_status()
         viewer = self.query_one("#viewer", VimTextArea)
+        viewer.cancel_vim_command()
+        self._refresh_status()
         if (
             not self._suspend_alignment
             and viewer.has_focus
@@ -4618,8 +5050,9 @@ class ViewerApp(App[None]):
         self, _event: TextArea.SelectionChanged
     ) -> None:
         self._clear_stale_search_match("annotator")
-        self._refresh_status()
         annotator = self.query_one("#annotator", AnnotationTextArea)
+        annotator.cancel_vim_command()
+        self._refresh_status()
         if (
             not self._suspend_alignment
             and annotator.has_focus
@@ -4669,6 +5102,12 @@ class ViewerApp(App[None]):
             and self.sync_mode in {SyncMode.NORMAL, SyncMode.SYNC}
         ):
             self._align_annotation_to_source()
+
+    @on(HalfPageBottomScrollTextArea.CommandStateChanged)
+    def on_vim_command_state_changed(
+        self, _event: HalfPageBottomScrollTextArea.CommandStateChanged
+    ) -> None:
+        self._refresh_status()
 
     @on(AnnotationTextArea.ModeChanged)
     def on_annotator_mode_changed(

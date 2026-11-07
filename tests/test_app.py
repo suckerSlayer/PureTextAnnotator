@@ -145,10 +145,10 @@ def test_edit_mode_buffers_source_and_supports_vim_exit_keys(
                 "EDIT"
             )
             await pilot.press(
-                "q", "w", "i", "z", "o", "c", "t", "b", "u"
+                "q", "w", "i", "z", "o", "c", "t", "b", "u", "1", "0"
             )
             await pilot.pause()
-            assert viewer.text == "alpha betaqwizoctbu"
+            assert viewer.text == "alpha betaqwizoctbu10"
             assert source_path.read_text(encoding="utf-8") == "alpha beta"
             assert "MODIFIED: source" in app.query_one(
                 "#status", Static
@@ -266,7 +266,9 @@ def test_quit_prompt_saves_all_dirty_panes(tmp_path: Path) -> None:
             await pilot.pause()
             confirmation = app.screen.query_one("#edit-confirmation", Input)
             confirmation.value = "Yes"
-            await pilot.press("enter", "x", "escape", "tab", "G", "i")
+            await pilot.press(
+                "enter", "x", "escape", "ctrl+w", "w", "G", "i"
+            )
             await pilot.press("n", "o", "t", "e", "ctrl+q")
             await pilot.pause()
 
@@ -296,7 +298,7 @@ def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
         async with app.run_test(size=(100, 22)) as pilot:
             viewer = app.query_one(VimTextArea)
             annotator = app.query_one(AnnotationTextArea)
-            await pilot.press("tab", "G", "i")
+            await pilot.press("ctrl+w", "w", "G", "i")
             await pilot.pause()
 
             assert annotator.has_focus
@@ -308,10 +310,21 @@ def test_annotation_edit_mode_needs_no_warning_and_buffers_sidecar(
             )
 
             await pilot.press(
-                "q", "w", "i", "z", "o", "c", "t", "b", "u", "m"
+                "q",
+                "w",
+                "i",
+                "z",
+                "o",
+                "c",
+                "t",
+                "b",
+                "u",
+                "m",
+                "1",
+                "0",
             )
             await pilot.pause()
-            assert annotator.text.endswith("qwizoctbum")
+            assert annotator.text.endswith("qwizoctbum10")
             assert not app.annotation_store.path.exists()
 
             await pilot.press("ctrl+w", "x", "ctrl+h", "n", "o", "t", "e")
@@ -355,7 +368,7 @@ def test_ctrl_s_saves_dirty_panes_without_quitting(tmp_path: Path) -> None:
             assert source_path.read_text(encoding="utf-8") == "xalpha"
             assert app._dirty_panes() == ()
 
-            await pilot.press("escape", "tab", "G", "i")
+            await pilot.press("escape", "ctrl+w", "w", "G", "i")
             await pilot.press("n", "o", "t", "e", "ctrl+s")
             await pilot.pause()
 
@@ -411,7 +424,9 @@ def test_normal_undo_and_redo_buffered_edits_in_both_panes(
             assert viewer.text == "alpha"
 
             initial_annotations = app.annotation_store.initial_text()
-            await pilot.press("tab", "G", "i", "x", "y", "z", "escape")
+            await pilot.press(
+                "ctrl+w", "w", "G", "i", "x", "y", "z", "escape"
+            )
             await pilot.pause()
             assert annotator.canonical_text == initial_annotations + "xyz"
 
@@ -456,7 +471,7 @@ def test_e_moves_to_word_ends_in_both_panes(tmp_path: Path) -> None:
             await pilot.press("e")
             assert viewer.cursor_location == (2, 4)
 
-            await pilot.press("tab", "z", "i", "e")
+            await pilot.press("ctrl+w", "w", "z", "i", "e")
             assert annotator.cursor_location == (0, 2)
             await pilot.press("e")
             assert annotator.cursor_location == (1, 5)
@@ -493,7 +508,7 @@ def test_w_moves_to_word_starts_in_both_panes(tmp_path: Path) -> None:
             await pilot.press("w")
             assert viewer.cursor_location == (2, 7)
 
-            await pilot.press("tab", "z", "i", "w")
+            await pilot.press("ctrl+w", "w", "z", "i", "w")
             assert annotator.cursor_location == (1, 0)
             await pilot.press("w")
             assert annotator.cursor_location == (1, 6)
@@ -527,7 +542,7 @@ def test_b_moves_backward_by_vim_words_in_both_panes(
             await pilot.press("b")
             assert viewer.cursor_location == (0, 7)
 
-            await pilot.press("tab", "G", "b")
+            await pilot.press("ctrl+w", "w", "G", "b")
             assert annotator.cursor_location == (0, 16)
             await pilot.press("b")
             assert annotator.cursor_location == (0, 13)
@@ -605,11 +620,181 @@ def test_page_navigation_and_document_edges() -> None:
             await pilot.press("ctrl+b")
             assert viewer.cursor_location == (0, 0)
 
-            await pilot.press("g")
+            await pilot.press("g", "g")
             assert viewer.cursor_location == (0, 0)
 
             await pilot.press("G")
             assert viewer.cursor_location == viewer.document.end
+
+    asyncio.run(scenario())
+
+
+def test_gg_and_counted_gg_are_pane_local_vim_jumps(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_text = "\n".join(f"line {number}" for number in range(12))
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, len("line 0"), "line 0"),
+                "A note with enough sidecar lines for counted movement.",
+                annotation_id="counted-gg",
+                source_text=source_text,
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            viewer.move_cursor((5, 2))
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert viewer.cursor_location == (5, 2)
+            assert "CMD g" in app.query_one("#status", Static).render().plain
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+            assert viewer.jump_back_stack[-1] == (5, 2)
+
+            await pilot.press("7", "g", "g")
+            await pilot.pause()
+            assert viewer.cursor_location == (6, 0)
+
+            await pilot.press("1", "0", "g", "g")
+            await pilot.pause()
+            assert viewer.cursor_location == (9, 0)
+
+            await pilot.press("ctrl+w", "w")
+            assert annotator.has_focus
+            annotator.move_cursor((annotator.document.line_count - 1, 0))
+            annotation_end = annotator.cursor_location
+
+            await pilot.press("g")
+            await pilot.pause()
+            assert annotator.cursor_location == annotation_end
+            await pilot.press("g")
+            await pilot.pause()
+            assert annotator.cursor_location == (0, 0)
+            assert annotator.jump_back_stack
+
+            await pilot.press("6", "g", "g")
+            await pilot.pause()
+            assert annotator.cursor_location == (5, 0)
+
+    asyncio.run(scenario())
+
+
+def test_jump_history_is_independent_and_tab_is_ctrl_i(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_text = "zero\none\ntwo\nthree\nfour\nfive\nsix"
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        for annotation_id, quote in (
+            ("first", "zero"),
+            ("second", "three"),
+            ("third", "six"),
+        ):
+            start = source_text.index(quote)
+            store.append(
+                create_record(
+                    AnnotationDraft(start, start + len(quote), quote),
+                    f"Note for {quote}",
+                    annotation_id=annotation_id,
+                    source_text=source_text,
+                )
+            )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.pause()
+
+            await pilot.press("tab")
+            assert viewer.has_focus
+            assert viewer.cursor_location == (0, 0)
+
+            await pilot.press("ctrl+n", "ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (6, 0)
+            assert len(viewer.jump_back_stack) == 2
+            assert annotator.jump_back_stack == ()
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+
+            await pilot.press("ctrl+i")
+            await pilot.pause()
+            assert viewer.has_focus
+            assert viewer.cursor_location == (3, 0)
+            await pilot.press("tab")
+            await pilot.pause()
+            assert viewer.has_focus
+            assert viewer.cursor_location == (6, 0)
+            await pilot.press("shift+tab")
+            assert viewer.has_focus
+
+            viewer_back = viewer.jump_back_stack
+            viewer_forward = viewer.jump_forward_stack
+            viewer_location = viewer.cursor_location
+            await pilot.press("ctrl+w", "w")
+            assert annotator.has_focus
+            initial_annotation_location = annotator._full_cursor_location()
+
+            await pilot.press("G", "g", "g")
+            await pilot.pause()
+            assert annotator._full_cursor_location() == (0, 0)
+            assert len(annotator.jump_back_stack) == 2
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert annotator._full_cursor_location()[0] > 0
+            await pilot.press("tab")
+            await pilot.pause()
+            assert annotator.has_focus
+            assert annotator._full_cursor_location() == (0, 0)
+
+            assert initial_annotation_location in annotator.jump_back_stack
+            assert viewer.cursor_location == viewer_location
+            assert viewer.jump_back_stack == viewer_back
+            assert viewer.jump_forward_stack == viewer_forward
+
+    asyncio.run(scenario())
+
+
+def test_search_jump_is_recorded_in_focused_pane() -> None:
+    async def scenario() -> None:
+        app = ViewerApp(
+            make_source("zero\none\ntwo\nthree"),
+            clipboard_writer=lambda _text: "test",
+        )
+        async with app.run_test(size=(100, 22)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("/", "t", "h", "r", "e", "e", "enter")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+            await pilot.press("tab")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+            assert viewer.has_focus
 
     asyncio.run(scenario())
 
@@ -819,6 +1004,9 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             active_quote_style = annotator.get_component_rich_style(
                 "text-area--annotation-quote"
             )
+            subtitle_style = annotator.get_component_rich_style(
+                "text-area--annotation-subtitle"
+            )
             normal_source_style = viewer.get_component_rich_style(
                 "text-area--annotation"
             )
@@ -849,12 +1037,24 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert [
                 (span.start, span.end) for span in quote_line.spans
             ] == [(0, len("> zero"))]
-            assert (
-                annotator.get_line(
-                    display_line(first_link.sidecar_note_line)
-                ).spans
-                == []
+            canonical_lines = annotator.canonical_text.split("\n")
+            original_text_line = next(
+                line_number
+                for line_number in range(
+                    first_link.sidecar_start_line,
+                    first_link.sidecar_note_line,
+                )
+                if canonical_lines[line_number].strip() == "### Original text"
             )
+            for subtitle_line in (
+                original_text_line,
+                first_link.sidecar_note_line,
+            ):
+                rendered_subtitle = annotator.get_line(
+                    display_line(subtitle_line)
+                )
+                assert rendered_subtitle.spans
+                assert rendered_subtitle.spans[0].style == subtitle_style
             assert first_link.sidecar_note_start_line is not None
             note_line = annotator.get_line(
                 display_line(first_link.sidecar_note_start_line)
@@ -876,9 +1076,9 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert inactive_style != quote_line.spans[0].style
             assert inactive_style != note_line.spans[0].style
 
-            await pilot.press("tab")
+            await pilot.press("ctrl+w", "w")
             assert annotator.has_focus
-            await pilot.press("shift+tab")
+            await pilot.press("ctrl+w", "w")
             assert viewer.has_focus
 
             await pilot.press("G")
@@ -898,7 +1098,7 @@ def test_source_and_annotation_navigation_stay_aligned(tmp_path: Path) -> None:
             assert annotator.get_line(annotation_heading_line).spans
 
             annotator.focus()
-            await pilot.press("g")
+            await pilot.press("g", "g")
             await pilot.pause()
 
             assert viewer.cursor_location == (0, 0)
@@ -1008,12 +1208,15 @@ def test_annotation_menu_shows_help_and_deletes_current_annotation(
             await pilot.pause()
             assert isinstance(app.screen, AnnotationMenuModal)
             menu_dialog = app.screen.query_one("#annotation-menu-dialog")
-            assert menu_dialog.region.height <= 13
+            assert menu_dialog.region.height <= 17
             assert menu_dialog.region.y > app.query_one(VimTextArea).region.y
             assert "Annotation 1" in app.screen.query_one(
                 "#annotation-menu-current", Static
             ).render().plain
             assert app.screen.query_one("#menu-embed-pdf").disabled is True
+            assert app.screen.query_one("#menu-add-annotation").has_focus
+            assert app.screen.query_one("#menu-enter-edit-mode")
+            assert app.screen.query_one("#menu-switch-sync-mode")
 
             await pilot.press("k")
             await pilot.pause()
@@ -1034,6 +1237,41 @@ def test_annotation_menu_shows_help_and_deletes_current_annotation(
             assert "## Annotation 2" not in saved
             assert len(app.annotation_links) == 1
             assert app.annotation_links[0].source_range == AnnotationRange(9, 12)
+
+    asyncio.run(scenario())
+
+
+def test_annotation_menu_add_edit_and_sync_actions(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("zero one two", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            await pilot.press("v", "l", "l", "m", "a")
+            await pilot.pause()
+            assert isinstance(app.screen, NoteModal)
+            assert app.screen.query_one("#quote-preview", Static).render().plain == "ze"
+
+            await pilot.press("escape", "m", "s")
+            await pilot.pause()
+            assert app.sync_mode is SyncMode.SYNC
+
+            await pilot.press("m", "i")
+            await pilot.pause()
+            assert isinstance(app.screen, EditWarningModal)
+            assert viewer.edit_mode is False
+
+            await pilot.press("escape", "ctrl+w", "w", "m", "i")
+            await pilot.pause()
+            assert annotator.has_focus
+            assert annotator.edit_mode is True
+            assert not isinstance(app.screen, AnnotationMenuModal)
 
     asyncio.run(scenario())
 
@@ -1076,7 +1314,7 @@ def test_alignment_modes_and_manual_alignment(tmp_path: Path) -> None:
             await pilot.pause()
             assert annotator.active_link == second_link
 
-            await pilot.press("g")
+            await pilot.press("g", "g")
             await pilot.pause()
             assert annotator.active_link == first_link
 
@@ -1092,7 +1330,7 @@ def test_alignment_modes_and_manual_alignment(tmp_path: Path) -> None:
             assert viewer.cursor_location == (3, 0)
             assert viewer.active_annotation_range == second_link.source_range
 
-            await pilot.press("shift+s", "g")
+            await pilot.press("shift+s", "g", "g")
             await pilot.pause()
             assert app.sync_mode is SyncMode.SYNC
             assert annotator.active_link == first_link
@@ -1165,16 +1403,19 @@ def test_manual_alignment_centers_both_pane_cursors(
             annotator = app.query_one(AnnotationTextArea)
             app.sync_mode = SyncMode.OFF
 
+            annotation_before_alignment = annotator._full_cursor_location()
             viewer.move_cursor((90, 0))
             await pilot.press(".")
             await pilot.pause()
 
             assert annotator.active_link == app.annotation_links[-1]
+            assert annotator.jump_back_stack[-1] == annotation_before_alignment
             assert round(viewer.scroll_y) == centered_scroll(viewer)
             assert round(annotator.scroll_y) == centered_scroll(annotator)
 
             viewer.move_cursor((0, 0))
             viewer.scroll_to(y=0, animate=False, immediate=True)
+            source_before_alignment = viewer.cursor_location
             annotator.focus()
             last_note_line = annotator._display_line_for_full(
                 app.annotation_links[-1].sidecar_note_line
@@ -1184,6 +1425,7 @@ def test_manual_alignment_centers_both_pane_cursors(
             await pilot.pause()
 
             assert viewer.cursor_location == (90, 0)
+            assert viewer.jump_back_stack[-1] == source_before_alignment
             assert round(viewer.scroll_y) == centered_scroll(viewer)
             assert round(annotator.scroll_y) == centered_scroll(annotator)
 
@@ -1214,7 +1456,7 @@ def test_annotation_metadata_vim_folds_preserve_canonical_text(
         async with app.run_test(size=(110, 28)) as pilot:
             annotator = app.query_one(AnnotationTextArea)
             canonical = store.read_text()
-            await pilot.press("tab")
+            await pilot.press("ctrl+w", "w")
 
             assert annotator.folding_enabled is True
             assert annotator.canonical_text == canonical
@@ -1235,7 +1477,7 @@ def test_annotation_metadata_vim_folds_preserve_canonical_text(
             assert annotator.text.count("· zo opens") == 2
             assert app._dirty_panes() == ()
 
-            await pilot.press("g", "z", "o")
+            await pilot.press("g", "g", "z", "o")
             await pilot.pause()
             assert "document" not in annotator._closed_fold_keys
             assert annotator.text.count("· zo opens") == 1
@@ -1331,7 +1573,7 @@ def test_annotation_edit_unfolding_preserves_cursor_viewport_row(
 
         async with app.run_test(size=(110, 24)) as pilot:
             annotator = app.query_one(AnnotationTextArea)
-            await pilot.press("tab")
+            await pilot.press("ctrl+w", "w")
             target_link = app.annotation_links[7]
             display_row = annotator._display_line_for_full(
                 target_link.sidecar_note_line
@@ -1412,7 +1654,7 @@ def test_annotation_fold_commands_preserve_cursor_viewport_row(
 
         async with app.run_test(size=(110, 24)) as pilot:
             annotator = app.query_one(AnnotationTextArea)
-            await pilot.press("tab")
+            await pilot.press("ctrl+w", "w")
             target_fold = next(
                 fold
                 for fold in annotator.metadata_folds
@@ -1576,7 +1818,7 @@ def test_search_annotation_pane_and_cancel_prompt(tmp_path: Path) -> None:
             annotator = app.query_one(AnnotationTextArea)
             search_input = app.query_one(SearchInput)
 
-            await pilot.press("tab", "/")
+            await pilot.press("ctrl+w", "w", "/")
             assert search_input.has_focus
             await pilot.press("n", "e", "e", "d", "l", "e", "enter")
             await pilot.pause()

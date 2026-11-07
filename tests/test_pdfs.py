@@ -459,7 +459,7 @@ def test_pdf_annotation_ctrl_s_refreshes_copy(tmp_path: Path) -> None:
 
         async with app.run_test(size=(110, 28)) as pilot:
             annotator = app.query_one(AnnotationTextArea)
-            await pilot.press("tab", "i")
+            await pilot.press("ctrl+w", "w", "i")
             note_end = annotator.text.index("Original note") + len(
                 "Original note"
             )

@@ -166,10 +166,12 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | `b` | Move to the previous word |
 | `e` | Move to the end of the word |
 | `0` `$` or Home/End | Move to line start/end |
-| `g` `G` | Move to document start/end |
+| `gg` / `G` | Jump to document start/end |
+| `[count]gg` | Jump to the numbered line, for example `25gg` |
 | Ctrl+F / Ctrl+B or Page Down / Page Up | Move one page |
 | Ctrl+E / Ctrl+Y | Scroll down/up by one line |
 | `zt` / `zz` / `zb` | Place the cursor line at the top/middle/bottom |
+| Ctrl+O / Ctrl+I | Jump to the older/newer position in the focused pane's history |
 | `v` | Start or finish visual selection |
 | `a` | Add a note for the selected source text |
 | `i` | Enter Edit mode for the focused pane |
@@ -188,7 +190,6 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | `.` | Manually align and center both panes' cursor lines |
 | `zi` in annotations | Toggle metadata folding on/off |
 | `zo` / `zc` in annotations | Open/close the metadata fold at the cursor |
-| Tab / Shift+Tab | Switch between source and annotation panes |
 | Ctrl+W, then `w` | Switch between source and annotation panes |
 | Shift+arrow keys | Extend a selection |
 | Mouse drag | Select text |
@@ -200,6 +201,13 @@ The `w`, `b`, and `e` motions are available in both panes and follow Vim's
 lowercase-word boundaries: letters, numbers, and underscores form one kind of
 word, while adjacent non-blank symbols form another. Whitespace is skipped.
 
+A single `g` is only a pending prefix and does not move the cursor. `gg`, `G`,
+counted `gg`, annotation navigation, searches, and explicit cross-pane alignment
+record jumps. Ctrl+O walks backward and Ctrl+I walks forward through a separate
+history for each pane. Because terminals encode Ctrl+I and Tab as the same key,
+Tab also performs a forward-history jump; Tab and Shift+Tab no longer switch
+panes.
+
 Both panes provide trailing scroll space equal to half their visible height.
 This lets the final document line move to the middle of its pane with `zz` or
 manual alignment; the blank space is visual only and is never saved to either
@@ -208,8 +216,15 @@ file.
 ## Annotation action menu
 
 Press `m` in Normal mode from either pane to open a compact menu while keeping
-the source and annotation panes visible. The menu provides these actions:
+the source and annotation panes visible. **Add annotation** is focused by
+default. The menu provides these actions:
 
+- **Add annotation** opens the note prompt for the current source selection,
+  with the same validation as the `a` key.
+- **Enter Edit mode** acts on the pane from which the menu was opened. Source
+  editing still requires the literal `Yes` warning confirmation; annotation
+  editing starts immediately.
+- **Switch Sync mode** cycles Normal, Sync, and Off alignment just like `S`.
 - **Delete current annotation** asks for confirmation, atomically removes the
   selected sidecar block, renumbers the remaining display headings, and leaves
   the source unchanged. Save or discard unrelated edits before deleting.
@@ -394,6 +409,7 @@ dimmed so the current note remains easy to identify.
   no OCR or rendered-page pane
 - Exact-hash PDF extraction caching for faster repeat opens
 - Exact-source cursor restoration across viewer sessions
+- Independent Vim-style jump histories for the source and annotation panes
 - Automatic refresh of the default annotated PDF copy after annotation saves
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
