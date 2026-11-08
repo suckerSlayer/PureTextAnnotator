@@ -11,6 +11,7 @@ from pypdf.generic import (
     DecodedStreamObject,
     DictionaryObject,
     FloatObject,
+    IndirectObject,
     NameObject,
     TextStringObject,
 )
@@ -23,6 +24,7 @@ from pure_text_annotator.annotations import (
 from pure_text_annotator.embed import PdfEmbedError, embed_pdf_annotations
 from pure_text_annotator.embed_cli import main
 from pure_text_annotator.files import LoadedTextFile, load_source_file
+from pure_text_annotator.pdf_import import import_pdf_text_markups
 
 from pdf_fixtures import write_text_pdf
 
@@ -102,11 +104,13 @@ def test_embed_single_page_note_as_standard_highlight(tmp_path: Path) -> None:
 
     result = embed_pdf_annotations(source_path)
 
-    assert result.output_path == tmp_path / "paper.annotated.pdf"
+    assert result.output_path == source_path
     assert result.annotation_count == 1
     assert result.highlight_count == 1
-    assert source_path.read_bytes() == source_before
-    assert sidecar.read_bytes() == sidecar_before
+    assert source_path.read_bytes() != source_before
+    assert sidecar.read_bytes() != sidecar_before
+    assert b"pdf_sync_document_sha256" in sidecar.read_bytes()
+    assert b"pdf_sync:" in sidecar.read_bytes()
 
     reader = PdfReader(result.output_path)
     annotations = _annotations(reader, 0)
@@ -164,6 +168,8 @@ def test_embed_multi_page_note_creates_one_highlight_per_page(
 def test_existing_noncolliding_annotations_are_preserved(tmp_path: Path) -> None:
     source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
     _write_existing_highlight(source_path, annotation_name="existing-note")
+    imported = import_pdf_text_markups(source_path, use_pdf_cache=False)
+    assert imported.imported_count == 1
     source = load_source_file(source_path)
     _append_note(
         source,
@@ -175,26 +181,61 @@ def test_existing_noncolliding_annotations_are_preserved(tmp_path: Path) -> None
     result = embed_pdf_annotations(source_path)
 
     annotations = _annotations(PdfReader(result.output_path), 0)
-    assert {str(item["/NM"]) for item in annotations} == {
-        "existing-note",
-        "new-note",
-    }
-    existing = next(item for item in annotations if item["/NM"] == "existing-note")
+    assert len(annotations) == 2
+    assert "new-note" in {str(item["/NM"]) for item in annotations}
+    existing = next(item for item in annotations if item["/Contents"] == "Existing")
+    assert str(existing["/NM"]).startswith("pdf-import-")
     assert existing["/Contents"] == "Existing"
 
 
-def test_existing_annotation_name_collision_fails_without_output(
+def test_embed_handles_preview_append_mode_catalog_info(tmp_path: Path) -> None:
+    source_path = write_text_pdf(tmp_path / "preview-saved.pdf", ("Alpha beta",))
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    preview_info = DictionaryObject(
+        {
+            NameObject("/Producer"): TextStringObject(
+                "macOS Quartz PDFContext, AppendMode"
+            )
+        }
+    )
+    inner_info = writer._add_object(preview_info)
+    writer._objects.append(inner_info)
+    outer_info = IndirectObject(len(writer._objects), 0, writer)
+    writer.root_object[NameObject("/Info")] = outer_info
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+
+    source = load_source_file(source_path)
+    _append_note(
+        source,
+        "beta",
+        annotation_id="preview-compatible",
+        note="Embed after Preview save",
+    )
+
+    result = embed_pdf_annotations(source_path)
+
+    annotations = _annotations(PdfReader(result.output_path), 0)
+    assert len(annotations) == 1
+    assert annotations[0]["/NM"] == "preview-compatible"
+
+
+def test_unreconciled_existing_markup_blocks_embedding_without_modifying_pdf(
     tmp_path: Path,
 ) -> None:
     source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
     _write_existing_highlight(source_path, annotation_name="same-id")
     source = load_source_file(source_path)
     _append_note(source, "beta", annotation_id="same-id", note="New note")
+    source_before = source_path.read_bytes()
 
-    with pytest.raises(PdfEmbedError, match="name collision"):
+    with pytest.raises(PdfEmbedError, match="run pta-import first"):
         embed_pdf_annotations(source_path)
 
-    assert not (tmp_path / "paper.annotated.pdf").exists()
+    assert source_path.read_bytes() == source_before
 
 
 @pytest.mark.parametrize(
@@ -239,11 +280,12 @@ def test_invalid_or_stale_sidecars_fail_without_partial_output(
         note="Strict note",
     )
     sidecar.write_text(mutation(sidecar.read_text(encoding="utf-8")), encoding="utf-8")
+    source_before = source_path.read_bytes()
 
     with pytest.raises(PdfEmbedError, match=message):
         embed_pdf_annotations(source_path)
 
-    assert not (tmp_path / "paper.annotated.pdf").exists()
+    assert source_path.read_bytes() == source_before
 
 
 def test_duplicate_annotation_ids_fail_all_or_nothing(tmp_path: Path) -> None:
@@ -251,14 +293,15 @@ def test_duplicate_annotation_ids_fail_all_or_nothing(tmp_path: Path) -> None:
     source = load_source_file(source_path)
     _append_note(source, "Alpha", annotation_id="duplicate-id", note="First")
     _append_note(source, "gamma", annotation_id="duplicate-id", note="Second")
+    source_before = source_path.read_bytes()
 
     with pytest.raises(PdfEmbedError, match="duplicate annotation ID"):
         embed_pdf_annotations(source_path)
 
-    assert not (tmp_path / "paper.annotated.pdf").exists()
+    assert source_path.read_bytes() == source_before
 
 
-def test_output_collision_requires_force_and_source_can_never_be_output(
+def test_output_collision_requires_force_and_source_is_default_target(
     tmp_path: Path,
 ) -> None:
     source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
@@ -276,9 +319,11 @@ def test_output_collision_requires_force_and_source_can_never_be_output(
     assert output.read_bytes().startswith(b"%PDF-")
 
     source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    with pytest.raises(PdfEmbedError, match="overwrite the source"):
-        embed_pdf_annotations(source_path, output_path=source_path, force=True)
-    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source_hash
+    in_place = embed_pdf_annotations(
+        source_path, output_path=source_path, force=True
+    )
+    assert in_place.output_path == source_path
+    assert hashlib.sha256(source_path.read_bytes()).hexdigest() != source_hash
 
 
 def test_encrypted_and_signed_pdfs_are_rejected(tmp_path: Path) -> None:
@@ -331,7 +376,10 @@ def test_cli_reports_success_and_validation_errors(
 
     assert main([str(source_path), "--output", str(output)]) == 0
     captured = capsys.readouterr()
-    assert "Embedded 1 annotation(s) as 1 highlight(s)" in captured.out
+    assert (
+        "Synchronized 1 sidecar annotation(s) as 1 PDF text-markup annotation(s)"
+        in captured.out
+    )
     assert str(output) in captured.out
     assert captured.err == ""
 
@@ -377,6 +425,7 @@ def test_output_verification_rejects_changed_page_content(
     source_path = write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta gamma",))
     source = load_source_file(source_path)
     _append_note(source, "beta", annotation_id="mutated", note="A note")
+    source_before = source_path.read_bytes()
     original_add_annotation = PdfWriter.add_annotation
 
     def mutate_page_content(writer, page_number, annotation, *args, **kwargs):
@@ -395,4 +444,4 @@ def test_output_verification_rejects_changed_page_content(
     with pytest.raises(PdfEmbedError, match="page content differs"):
         embed_pdf_annotations(source_path, loaded_source=source)
 
-    assert not (tmp_path / "paper.annotated.pdf").exists()
+    assert source_path.read_bytes() == source_before

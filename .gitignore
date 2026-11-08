@@ -47,6 +47,7 @@ dist/
 *.sqlite3
 /examples/*.annotations.md
 *.annotations.md.before-rematch-*
+*.annotations.md.before-pdf-conflict-*
 
 # Editor and operating-system files
 .DS_Store

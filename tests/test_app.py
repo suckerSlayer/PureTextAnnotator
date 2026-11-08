@@ -1153,11 +1153,27 @@ def test_ctrl_n_and_ctrl_p_navigate_annotations_from_both_panes(
             assert viewer.active_annotation_range == second_link.source_range
             assert annotator.active_link == second_link
 
+            viewer_jump_count = len(viewer.jump_back_stack)
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (3, 0)
+            assert viewer.active_annotation_range == second_link.source_range
+            assert annotator.active_link == second_link
+            assert len(viewer.jump_back_stack) == viewer_jump_count
+
             await pilot.press("ctrl+p")
             await pilot.pause()
             assert viewer.cursor_location == (0, 0)
             assert viewer.active_annotation_range == first_link.source_range
             assert annotator.active_link == first_link
+
+            viewer_jump_count = len(viewer.jump_back_stack)
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+            assert viewer.active_annotation_range == first_link.source_range
+            assert annotator.active_link == first_link
+            assert len(viewer.jump_back_stack) == viewer_jump_count
 
             app.sync_mode = SyncMode.SYNC
             annotator.focus()
@@ -1171,8 +1187,27 @@ def test_ctrl_n_and_ctrl_p_navigate_annotations_from_both_panes(
 
             await pilot.press("ctrl+n")
             await pilot.pause()
+            assert annotator.active_link == second_link
+            assert viewer.cursor_location == (3, 0)
+
+            annotation_jump_count = len(annotator.jump_back_stack)
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert annotator.active_link == second_link
+            assert viewer.cursor_location == (3, 0)
+            assert len(annotator.jump_back_stack) == annotation_jump_count
+
+            await pilot.press("ctrl+p")
+            await pilot.pause()
             assert annotator.active_link == first_link
             assert viewer.cursor_location == (0, 0)
+
+            annotation_jump_count = len(annotator.jump_back_stack)
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            assert annotator.active_link == first_link
+            assert viewer.cursor_location == (0, 0)
+            assert len(annotator.jump_back_stack) == annotation_jump_count
 
     asyncio.run(scenario())
 

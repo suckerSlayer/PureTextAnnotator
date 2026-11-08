@@ -46,8 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-embed-on-save",
         action="store_true",
         help=(
-            "do not refresh the default annotated PDF copy after annotation "
-            "saves"
+            "do not synchronize annotations into the source PDF after saves"
         ),
     )
     parser.add_argument(
@@ -67,6 +66,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     except TextFileError as error:
         print(f"pta-view: {error}", file=sys.stderr)
         return 2
+
+    if source.source_kind == "pdf":
+        from .pdf_import import PdfImportError, import_pdf_text_markups
+
+        try:
+            import_pdf_text_markups(
+                source.path,
+                loaded_source=source,
+                use_pdf_cache=not args.no_pdf_cache,
+                rebuild_pdf_cache=args.rebuild_pdf_cache,
+            )
+        except PdfImportError as error:
+            print(
+                "pta-view: warning: could not reconcile PDF annotations: "
+                f"{error}",
+                file=sys.stderr,
+            )
 
     app = ViewerApp(
         source,

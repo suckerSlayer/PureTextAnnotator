@@ -1,4 +1,4 @@
-"""Command-line interface for embedding sidecar notes into a PDF copy."""
+"""Command-line interface for synchronizing sidecar notes into a PDF."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pta-embed",
         description=(
-            "Embed Pure Text Annotator sidecar notes as standard highlights "
-            "in a separate PDF copy."
+            "Synchronize Pure Text Annotator sidecar notes as standard "
+            "text-markup annotations in the source PDF atomically."
         ),
     )
     parser.add_argument("source", type=Path, help="text-layer source PDF")
@@ -28,12 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        help="output path (default: SOURCE.annotated.pdf)",
+        help="optional separate export path (default: update SOURCE in place)",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="replace an existing output file; never replaces the source PDF",
+        help="replace an existing explicit --output file",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -55,8 +55,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     print(
-        f"Embedded {result.annotation_count} annotation(s) as "
-        f"{result.highlight_count} highlight(s): {result.output_path}"
+        f"Synchronized {result.annotation_count} sidecar annotation(s) as "
+        f"{result.highlight_count} PDF text-markup annotation(s): "
+        f"{result.output_path}"
     )
     return 0
 

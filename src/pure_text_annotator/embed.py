@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 import re
@@ -14,26 +15,31 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 from pypdf import PdfReader, PdfWriter
-from pypdf.annotations import Highlight
 from pypdf.generic import (
     ArrayObject,
     DictionaryObject,
     FloatObject,
     NameObject,
+    NumberObject,
     NullObject,
+    RectangleObject,
     TextStringObject,
 )
 
 from .annotations import PdfAnchor, PdfAnchorFragment
 from .embed_state import file_sha256, save_embed_receipt
 from .files import LoadedTextFile, TextFileError, load_source_file
+from .pdfs import rebind_loaded_pdf
 from .rematch import ParsedAnnotation, parse_annotation_records, text_sha256
 
 
 COORDINATE_SYSTEM = "pdf-user-space-bottom-left"
-HIGHLIGHT_COLOR = "ffff00"
+DEFAULT_HIGHLIGHT_COLOR = (1.0, 1.0, 0.0)
 ANNOTATION_AUTHOR = "Pure Text Annotator"
 ANNOTATION_SUBJECT = "Pure Text Annotator note"
+SUPPORTED_TEXT_MARKUP_SUBTYPES = frozenset(
+    {"Highlight", "Underline", "Squiggly", "StrikeOut"}
+)
 GEOMETRY_TOLERANCE = 0.01
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _YAML_OPEN_RE = re.compile(r"(?m)^```yaml[ \t]*(?:\n|$)")
@@ -56,6 +62,10 @@ class PdfEmbedRecord:
     created_at: str
     pdf_date: str
     pdf_anchor: PdfAnchor
+    subtype: str
+    color: Tuple[float, ...]
+    author: Optional[str]
+    subject: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -128,10 +138,9 @@ def default_annotations_path(source_path: Path) -> Path:
 
 
 def default_output_path(source_path: Path) -> Path:
-    """Return a non-destructive output path beside a source PDF."""
+    """Return the canonical in-place PDF synchronization target."""
 
-    source = Path(source_path).expanduser()
-    return source.with_name(source.stem + ".annotated.pdf")
+    return Path(source_path).expanduser()
 
 
 def _mapping(value: object, field: str) -> Mapping[str, Any]:
@@ -176,6 +185,42 @@ def _float_sequence(
             raise PdfEmbedError(f"{field} must contain only finite numbers")
         output.append(converted)
     return tuple(output)
+
+
+def _optional_string(value: object, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PdfEmbedError(f"{field} must be a string or null")
+    return value or None
+
+
+def _annotation_color(value: object, field: str) -> Tuple[float, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) not in {0, 1, 3, 4}:
+        raise PdfEmbedError(f"{field} must contain 0, 1, 3, or 4 numbers")
+    output = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise PdfEmbedError(f"{field} must contain only numbers")
+        converted = float(item)
+        if not math.isfinite(converted) or not 0.0 <= converted <= 1.0:
+            raise PdfEmbedError(f"{field} values must be between 0 and 1")
+        output.append(converted)
+    return tuple(output)
+
+
+def _sidecar_pdf_sync_hash(sidecar_text: str) -> Optional[str]:
+    if not sidecar_text.startswith("---\n"):
+        return None
+    closing = sidecar_text.find("\n---", 4)
+    if closing < 0:
+        return None
+    front_matter = sidecar_text[4:closing]
+    match = re.search(
+        r'(?m)^pdf_sync_document_sha256:[ \t]*"([0-9a-f]{64})"[ \t]*$',
+        front_matter,
+    )
+    return match.group(1) if match is not None else None
 
 
 def _validate_rectangle(rectangle: Sequence[float], field: str) -> None:
@@ -388,8 +433,6 @@ def parse_pdf_embed_records(
         raise PdfEmbedError("source does not provide PDF geometry")
 
     parsed_records = parse_annotation_records(sidecar_text)
-    if not parsed_records:
-        raise PdfEmbedError("annotation sidecar contains no annotation records")
 
     canonical_sha = text_sha256(source_text)
     output: List[PdfEmbedRecord] = []
@@ -454,6 +497,38 @@ def parse_pdf_embed_records(
                     "PDF anchor geometry is stale or does not match this PDF"
                 )
 
+            subtype = "Highlight"
+            color = DEFAULT_HIGHLIGHT_COLOR
+            author: Optional[str] = ANNOTATION_AUTHOR
+            subject: Optional[str] = ANNOTATION_SUBJECT
+            pdf_import_value = metadata.get("pdf_import")
+            if pdf_import_value is not None:
+                pdf_import = _mapping(pdf_import_value, "pdf_import")
+                if _integer(pdf_import.get("version"), "pdf_import.version") != 1:
+                    raise PdfEmbedError("pdf_import.version must be 1")
+                _sha256(
+                    pdf_import.get("source_document_sha256"),
+                    "pdf_import.source_document_sha256",
+                )
+                _sha256(
+                    pdf_import.get("fingerprint"),
+                    "pdf_import.fingerprint",
+                )
+                subtype = _string(pdf_import.get("subtype"), "pdf_import.subtype")
+                if subtype not in SUPPORTED_TEXT_MARKUP_SUBTYPES:
+                    raise PdfEmbedError(
+                        f"pdf_import.subtype {subtype!r} is not supported"
+                    )
+                color = _annotation_color(
+                    pdf_import.get("color"), "pdf_import.color"
+                )
+                author = _optional_string(
+                    pdf_import.get("author"), "pdf_import.author"
+                )
+                subject = _optional_string(
+                    pdf_import.get("subject"), "pdf_import.subject"
+                )
+
             output.append(
                 PdfEmbedRecord(
                     annotation_id=record.annotation_id,
@@ -464,6 +539,10 @@ def parse_pdf_embed_records(
                     created_at=created_at,
                     pdf_date=pdf_date,
                     pdf_anchor=pdf_anchor,
+                    subtype=subtype,
+                    color=color,
+                    author=author,
+                    subject=subject,
                 )
             )
         except PdfEmbedError as error:
@@ -493,6 +572,26 @@ def _page_annotations(page: object) -> Tuple[DictionaryObject, ...]:
         )
     except Exception as error:
         raise PdfEmbedError(f"cannot inspect existing PDF annotations: {error}") from error
+
+
+def _clone_document(reader: PdfReader, writer: PdfWriter) -> None:
+    """Clone a PDF while tolerating Preview's non-standard catalog ``/Info``."""
+
+    root = reader.root_object
+    info_key = NameObject("/Info")
+    catalog_info = root.raw_get(info_key) if info_key in root else None
+    if catalog_info is not None:
+        # macOS Preview append-mode saves can place an indirect-to-indirect
+        # metadata reference under the Catalog. /Info belongs in the trailer,
+        # and pypdf cannot clone that non-standard Catalog value. Temporarily
+        # omit only this invalid key; page content and annotations are retained
+        # and verified after writing.
+        del root[info_key]
+    try:
+        writer.clone_document_from_reader(reader)
+    finally:
+        if catalog_info is not None:
+            root[info_key] = catalog_info
 
 
 def _has_digital_signature(reader: PdfReader) -> bool:
@@ -536,44 +635,116 @@ def _has_digital_signature(reader: PdfReader) -> bool:
     return any(signed(field) for field in fields)
 
 
-def _ensure_no_name_collisions(
-    reader: PdfReader, records: Sequence[PdfEmbedRecord]
+def _supported_annotation_count(reader: PdfReader) -> int:
+    return sum(
+        str(annotation.get("/Subtype", "")).removeprefix("/")
+        in SUPPORTED_TEXT_MARKUP_SUBTYPES
+        for page in reader.pages
+        for annotation in _page_annotations(page)
+    )
+
+
+def _reference_key(value: object) -> Optional[Tuple[int, int]]:
+    idnum = getattr(value, "idnum", None)
+    generation = getattr(value, "generation", None)
+    if isinstance(idnum, int) and isinstance(generation, int):
+        return idnum, generation
+    return None
+
+
+def _remove_supported_text_markups(
+    writer: PdfWriter, records: Sequence[PdfEmbedRecord]
 ) -> Tuple[int, ...]:
-    target_ids = {record.annotation_id for record in records}
-    counts = []
+    """Remove mirrored markups while preserving unrelated PDF annotations."""
+
+    targets_by_page: Dict[int, set[str]] = {}
+    for record in records:
+        for fragment in record.pdf_anchor.fragments:
+            targets_by_page.setdefault(fragment.page_index, set()).add(
+                record.annotation_id
+            )
+
+    preserved_counts = []
     collisions = []
-    for page_index, page in enumerate(reader.pages):
-        annotations = _page_annotations(page)
-        counts.append(len(annotations))
-        for annotation in annotations:
+    for page_index, page in enumerate(writer.pages):
+        raw_annotations = page.get("/Annots")
+        if raw_annotations is None:
+            preserved_counts.append(0)
+            continue
+        resolved = _resolve(raw_annotations)
+        raw_items = tuple(resolved)  # type: ignore[arg-type]
+        removed_references = {
+            key
+            for raw in raw_items
+            for key in (_reference_key(raw),)
+            if key is not None
+            and str(_resolve(raw).get("/Subtype", "")).removeprefix("/")
+            in SUPPORTED_TEXT_MARKUP_SUBTYPES
+        }
+        kept = ArrayObject()
+        for raw in raw_items:
+            annotation = _resolve(raw)
+            if not isinstance(annotation, DictionaryObject):
+                kept.append(raw)
+                continue
+            subtype = str(annotation.get("/Subtype", "")).removeprefix("/")
+            if subtype in SUPPORTED_TEXT_MARKUP_SUBTYPES:
+                continue
+            if subtype == "Popup":
+                parent_key = _reference_key(annotation.raw_get("/Parent")) if "/Parent" in annotation else None
+                if parent_key in removed_references:
+                    continue
             annotation_name = annotation.get("/NM")
-            if annotation_name is not None and str(annotation_name) in target_ids:
-                collisions.append(f"{annotation_name!s} on page {page_index + 1}")
+            if (
+                annotation_name is not None
+                and str(annotation_name) in targets_by_page.get(page_index, set())
+            ):
+                collisions.append(
+                    f"{annotation_name!s} on page {page_index + 1}"
+                )
+            kept.append(raw)
+        if kept:
+            page[NameObject("/Annots")] = kept
+        elif "/Annots" in page:
+            del page[NameObject("/Annots")]
+        preserved_counts.append(len(kept))
     if collisions:
         raise PdfEmbedError(
-            "the source PDF already contains annotation name collision(s): "
+            "an unrelated PDF annotation uses a sidecar annotation ID: "
             + ", ".join(collisions)
         )
-    return tuple(counts)
+    return tuple(preserved_counts)
 
 
-def _highlight(record: PdfEmbedRecord, fragment: PdfAnchorFragment) -> Highlight:
+def _text_markup(
+    record: PdfEmbedRecord, fragment: PdfAnchorFragment
+) -> DictionaryObject:
     quad_points = ArrayObject(
         FloatObject(coordinate)
         for quad in fragment.quad_points_pdf
         for coordinate in quad
     )
-    annotation = Highlight(
-        rect=fragment.rect_pdf,
-        quad_points=quad_points,
-        highlight_color=HIGHLIGHT_COLOR,
-        printing=True,
-        title_bar=ANNOTATION_AUTHOR,
+    annotation = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject(f"/{record.subtype}"),
+            NameObject("/Rect"): RectangleObject(fragment.rect_pdf),
+            NameObject("/QuadPoints"): quad_points,
+            NameObject("/F"): NumberObject(4),
+        }
     )
     annotation[NameObject("/Contents")] = TextStringObject(record.note)
     annotation[NameObject("/NM")] = TextStringObject(record.annotation_id)
     annotation[NameObject("/M")] = TextStringObject(record.pdf_date)
-    annotation[NameObject("/Subj")] = TextStringObject(ANNOTATION_SUBJECT)
+    annotation[NameObject("/CreationDate")] = TextStringObject(record.pdf_date)
+    if record.color:
+        annotation[NameObject("/C")] = ArrayObject(
+            FloatObject(value) for value in record.color
+        )
+    if record.author is not None:
+        annotation[NameObject("/T")] = TextStringObject(record.author)
+    if record.subject is not None:
+        annotation[NameObject("/Subj")] = TextStringObject(record.subject)
     return annotation
 
 
@@ -692,13 +863,21 @@ def _verify_output(
                     f"{record.annotation_id!r} on page {fragment.page_index + 1}"
                 )
             annotation = matches[0]
-            if str(annotation.get("/Subtype")) != "/Highlight":
-                raise PdfEmbedError("generated PDF annotation subtype is not Highlight")
+            if str(annotation.get("/Subtype")) != f"/{record.subtype}":
+                raise PdfEmbedError(
+                    "generated PDF annotation subtype does not match the sidecar"
+                )
             if str(annotation.get("/Contents", "")) != record.note:
                 raise PdfEmbedError("generated PDF annotation note does not match")
-            if str(annotation.get("/T", "")) != ANNOTATION_AUTHOR:
+            if (
+                str(annotation.get("/T")) if annotation.get("/T") is not None else None
+            ) != record.author:
                 raise PdfEmbedError("generated PDF annotation author does not match")
-            if str(annotation.get("/Subj", "")) != ANNOTATION_SUBJECT:
+            if (
+                str(annotation.get("/Subj"))
+                if annotation.get("/Subj") is not None
+                else None
+            ) != record.subject:
                 raise PdfEmbedError("generated PDF annotation subject does not match")
             if str(annotation.get("/M", "")) != record.pdf_date:
                 raise PdfEmbedError("generated PDF annotation timestamp does not match")
@@ -716,6 +895,11 @@ def _verify_output(
                 expected_quads,
             ):
                 raise PdfEmbedError("generated PDF highlight geometry does not match")
+            if record.color and not _close_numbers(
+                _numbers(annotation.get("/C"), "/C"),
+                record.color,
+            ):
+                raise PdfEmbedError("generated PDF annotation color does not match")
 
     for page_index, page in enumerate(reader.pages):
         actual = len(_page_annotations(page))
@@ -734,7 +918,7 @@ def embed_pdf_annotations(
     force: bool = False,
     loaded_source: Optional[LoadedTextFile] = None,
 ) -> PdfEmbedResult:
-    """Embed every valid sidecar record into a new, atomically written PDF."""
+    """Reconcile every valid sidecar record into an atomically written PDF."""
 
     source = Path(source_path).expanduser().resolve()
     annotations = (
@@ -747,13 +931,12 @@ def embed_pdf_annotations(
         if output_path is not None
         else default_output_path(source).resolve()
     )
+    in_place = output == source
 
     if source.suffix.lower() != ".pdf":
         raise PdfEmbedError(f"source must be a PDF: {source}")
     if output.suffix.lower() != ".pdf":
         raise PdfEmbedError(f"output must use the .pdf extension: {output}")
-    if output == source:
-        raise PdfEmbedError("refusing to overwrite the source PDF")
     if output == annotations:
         raise PdfEmbedError("output PDF and annotation sidecar must be different files")
     if not source.exists() or not source.is_file():
@@ -762,7 +945,7 @@ def embed_pdf_annotations(
         raise PdfEmbedError(f"annotation sidecar does not exist: {annotations}")
     if not output.parent.exists() or not output.parent.is_dir():
         raise PdfEmbedError(f"output directory does not exist: {output.parent}")
-    if output.exists() and not force:
+    if output.exists() and not in_place and not force:
         raise PdfEmbedError(
             f"output already exists: {output}; pass --force to replace it"
         )
@@ -782,7 +965,7 @@ def embed_pdf_annotations(
     annotations_sha256 = hashlib.sha256(sidecar_bytes).hexdigest()
 
     try:
-        reader = PdfReader(source)
+        reader = PdfReader(io.BytesIO(source_bytes))
         if reader.is_encrypted:
             raise PdfEmbedError("encrypted PDFs are not supported for embedding")
         if _has_digital_signature(reader):
@@ -794,6 +977,19 @@ def embed_pdf_annotations(
         raise
     except Exception as error:
         raise PdfEmbedError(f"cannot inspect source PDF: {error}") from error
+
+    synced_revision = _sidecar_pdf_sync_hash(sidecar_text)
+    supported_annotation_count = _supported_annotation_count(reader)
+    if synced_revision is None and supported_annotation_count:
+        raise PdfEmbedError(
+            "the source PDF contains text-markup annotations not yet reconciled "
+            "with the sidecar; run pta-import first"
+        )
+    if synced_revision is not None and synced_revision != source_sha256:
+        raise PdfEmbedError(
+            "the source PDF changed after the last sidecar reconciliation; "
+            "run pta-import and review those PDF edits before embedding"
+        )
 
     if loaded_source is None:
         try:
@@ -817,19 +1013,19 @@ def embed_pdf_annotations(
         source_text=loaded_source.text,
         pdf_document=pdf_document,
     )
-    existing_counts = _ensure_no_name_collisions(reader, records)
     source_pages = tuple(_page_state(page) for page in reader.pages)
     highlight_count = sum(len(record.pdf_anchor.fragments) for record in records)
 
     writer = PdfWriter()
     temporary_path: Optional[Path] = None
     try:
-        writer.clone_document_from_reader(reader)
+        _clone_document(reader, writer)
+        existing_counts = _remove_supported_text_markups(writer, records)
         for record in records:
             for fragment in record.pdf_anchor.fragments:
                 writer.add_annotation(
                     page_number=fragment.page_index,
-                    annotation=_highlight(record, fragment),
+                    annotation=_text_markup(record, fragment),
                 )
 
         with tempfile.NamedTemporaryFile(
@@ -857,19 +1053,73 @@ def embed_pdf_annotations(
             raise PdfEmbedError(
                 "annotation sidecar changed while the output was being prepared"
             )
-        if output.exists() and not force:
+        if output.exists() and not in_place and not force:
             raise PdfEmbedError(
                 f"output appeared during export: {output}; pass --force to replace it"
             )
         output_sha256 = file_sha256(temporary_path)
         os.replace(temporary_path, output)
         temporary_path = None
+        if in_place:
+            try:
+                from .pdf_import import PdfImportError, import_pdf_text_markups
+
+                rebound_source = rebind_loaded_pdf(loaded_source)
+                import_pdf_text_markups(
+                    source,
+                    annotations_path=annotations,
+                    loaded_source=rebound_source,
+                    allow_sidecar_changes=True,
+                )
+            except (PdfImportError, TextFileError, OSError) as error:
+                restore_path: Optional[Path] = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb",
+                        dir=source.parent,
+                        prefix=f".{source.name}.",
+                        suffix=".rollback",
+                        delete=False,
+                    ) as restore:
+                        restore_path = Path(restore.name)
+                        os.fchmod(restore.fileno(), source.stat().st_mode & 0o666)
+                        restore.write(source_bytes)
+                        restore.flush()
+                        os.fsync(restore.fileno())
+                    os.replace(restore_path, source)
+                    restore_path = None
+                except OSError as rollback_error:
+                    raise PdfEmbedError(
+                        "source PDF was written, sidecar reconciliation failed, "
+                        f"and PDF rollback also failed: {rollback_error}"
+                    ) from error
+                finally:
+                    if restore_path is not None:
+                        try:
+                            restore_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                raise PdfEmbedError(
+                    "sidecar reconciliation failed; the original source PDF "
+                    f"was restored: {error}"
+                ) from error
+
+            final_source_sha256 = file_sha256(source)
+            final_annotations_sha256 = file_sha256(annotations)
+            if final_source_sha256 is not None:
+                output_sha256 = final_source_sha256
+            if final_annotations_sha256 is not None:
+                annotations_sha256 = final_annotations_sha256
+            source_sha256 = final_source_sha256 or source_sha256
+
         if output_sha256 is not None:
             save_embed_receipt(
                 source,
                 annotations,
                 output,
-                source_sha256=source_sha256,
+                source_sha256=(
+                    output_sha256 if in_place else source_sha256
+                ),
                 annotations_sha256=annotations_sha256,
                 output_sha256=output_sha256,
                 annotation_count=len(records),
@@ -878,7 +1128,7 @@ def embed_pdf_annotations(
     except PdfEmbedError:
         raise
     except Exception as error:
-        raise PdfEmbedError(f"cannot write annotated PDF: {error}") from error
+        raise PdfEmbedError(f"cannot write synchronized PDF: {error}") from error
     finally:
         writer.close()
         if temporary_path is not None:

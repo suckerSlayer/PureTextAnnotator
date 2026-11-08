@@ -4,6 +4,7 @@ import pytest
 
 from pure_text_annotator.annotations import (
     AnnotationDraft,
+    AnnotationFileError,
     AnnotationLink,
     AnnotationRange,
     AnnotationStore,
@@ -77,6 +78,25 @@ def test_store_preserves_existing_text_when_appending(tmp_path: Path) -> None:
     assert saved.startswith("User heading\n\nUser explanation.\n")
     assert "## Annotation 1" in saved
     assert "> two" in saved
+
+
+def test_batch_append_refuses_changed_sidecar(tmp_path: Path) -> None:
+    source = tmp_path / "chapter.txt"
+    source.write_text("one two", encoding="utf-8")
+    store = AnnotationStore(source)
+    expected = store.read_text()
+    external = expected + "\nExternal change.\n"
+    store.path.write_text(external, encoding="utf-8")
+    record = create_record(
+        AnnotationDraft(start=0, end=3, quote="one"),
+        "Imported note",
+        annotation_id="imported",
+    )
+
+    with pytest.raises(AnnotationFileError, match="sidecar changed"):
+        store.append_many((record,), expected_text=expected)
+
+    assert store.path.read_text(encoding="utf-8") == external
 
 
 def test_store_replaces_complete_annotation_document(tmp_path: Path) -> None:

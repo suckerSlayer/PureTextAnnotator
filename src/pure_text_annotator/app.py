@@ -37,6 +37,17 @@ from .annotations import (
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
 from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
 from .files import LoadedTextFile, TextFileError, load_source_file, save_text_file
+from .pdf_import import (
+    PdfAnnotationConflict,
+    PdfConflictDecision,
+    PdfConflictKind,
+    PdfConflictReport,
+    PdfConflictResolution,
+    PdfImportConflictError,
+    PdfImportError,
+    import_pdf_text_markups,
+    resolve_pdf_annotation_conflicts,
+)
 from .rematch import (
     RematchCandidate,
     RematchChoice,
@@ -46,6 +57,7 @@ from .rematch import (
     apply_rematches,
     confidence_summary,
     make_manual_candidate,
+    parse_annotation_records,
     scan_rematches,
     text_sha256,
     validate_applied_rematches,
@@ -57,6 +69,7 @@ SourceWriter = Callable[[LoadedTextFile, str], LoadedTextFile]
 RematchPreviewCallback = Callable[
     [RematchItem, Optional[RematchCandidate]], None
 ]
+PdfConflictPreviewCallback = Callable[[PdfAnnotationConflict], None]
 
 
 KEYBINDING_REFERENCE = """PURE TEXT ANNOTATOR KEYBINDINGS
@@ -77,7 +90,7 @@ Annotations
   v                       visual selection in source
   a                       annotate selected source text
   m                       annotation action menu
-  R                       review stale annotation rematches
+  R                       review PDF conflicts / stale rematches
   .                       align and center both panes manually
   S                       cycle Normal / Sync / Off alignment
   zi / zo / zc            toggle / open / close metadata folds
@@ -2116,13 +2129,13 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
                     id="menu-show-keybindings",
                 )
                 yield Button(
-                    "E  Embed annotations into PDF copy",
+                    "E  Synchronize annotations into source PDF",
                     id="menu-embed-pdf",
                     disabled=not self.is_pdf,
                 )
             yield Static(
-                "A/I/S/D/R/K/E chooses · Escape cancels · original PDFs are "
-                "never overwritten",
+                "A/I/S/D/R/K/E chooses · Escape cancels · PDF writes are "
+                "verified and atomic",
                 markup=False,
                 id="annotation-menu-hint",
             )
@@ -2462,6 +2475,453 @@ class DemoResetModal(ModalScreen[bool]):
     @on(Button.Pressed, "#confirm-demo-reset")
     def on_confirm_pressed(self, _event: Button.Pressed) -> None:
         self.dismiss(True)
+
+
+def _compact_conflict_text(value: Optional[str], limit: int = 72) -> str:
+    """Keep conflict evidence readable inside a compact overlay."""
+
+    if value is None:
+        return "(not present)"
+    compact = " ".join(value.split()) or "(empty)"
+    return compact if len(compact) <= limit else compact[: limit - 1] + "…"
+
+
+class PdfConflictReviewModal(
+    ModalScreen[Optional[tuple[PdfConflictResolution, ...]]]
+):
+    """Collect one explicit PDF-or-Markdown decision for every conflict."""
+
+    CSS = """
+    PdfConflictReviewModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #pdf-conflict-review-dialog {
+        width: 96%;
+        max-width: 120;
+        height: 13;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #pdf-conflict-review-title {
+        height: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #pdf-conflict-review-detail {
+        height: 1fr;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    #pdf-conflict-review-hint {
+        height: 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+
+    #pdf-conflict-review-buttons {
+        height: 3;
+        grid-size: 6 1;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-rows: 3;
+        grid-gutter: 0 1;
+    }
+
+    #pdf-conflict-review-buttons Button {
+        width: 1fr;
+        min-width: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("j,down", "next_conflict", "Next", priority=True, show=False),
+        Binding("k,up", "previous_conflict", "Previous", priority=True, show=False),
+        Binding("m", "keep_markdown", "Keep Markdown", priority=True, show=False),
+        Binding("p", "keep_pdf", "Keep PDF", priority=True, show=False),
+        Binding("ctrl+s", "continue_to_confirmation", "Confirm", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        report: PdfConflictReport,
+        initial_resolutions: Iterable[PdfConflictResolution] = (),
+        preview_callback: Optional[PdfConflictPreviewCallback] = None,
+    ) -> None:
+        super().__init__()
+        self.report = report
+        self.items = report.conflicts
+        self.current_index = 0
+        self.preview_callback = preview_callback
+        self.decisions = {
+            resolution.annotation_id: resolution.decision
+            for resolution in initial_resolutions
+        }
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pdf-conflict-review-dialog"):
+            yield Static(
+                "Review PDF/Markdown annotation conflicts",
+                markup=False,
+                id="pdf-conflict-review-title",
+            )
+            yield Static("", markup=False, id="pdf-conflict-review-detail")
+            yield Static(
+                "J/K conflict - M keep Markdown - P keep PDF - "
+                "all conflicts need a choice",
+                markup=False,
+                id="pdf-conflict-review-hint",
+            )
+            with Grid(id="pdf-conflict-review-buttons"):
+                yield Button("Cancel", id="cancel-pdf-conflict-review")
+                yield Button("<- Conflict", id="previous-pdf-conflict")
+                yield Button("Conflict ->", id="next-pdf-conflict")
+                yield Button("Keep Markdown", id="keep-markdown-conflict")
+                yield Button("Keep PDF", id="keep-pdf-conflict")
+                yield Button(
+                    "Confirm...",
+                    variant="primary",
+                    id="continue-pdf-conflicts",
+                )
+
+    def on_mount(self) -> None:
+        self._refresh_review()
+        self.query_one("#cancel-pdf-conflict-review", Button).focus()
+
+    def _current_conflict(self) -> Optional[PdfAnnotationConflict]:
+        if not self.items:
+            return None
+        return self.items[self.current_index]
+
+    @staticmethod
+    def _decision_label(
+        conflict: PdfAnnotationConflict,
+        decision: Optional[PdfConflictDecision],
+    ) -> str:
+        if decision is None:
+            return "UNDECIDED"
+        if decision is PdfConflictDecision.KEEP_MARKDOWN:
+            return (
+                "RESTORE INTO PDF"
+                if conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+                else "USE MARKDOWN"
+            )
+        return (
+            "DELETE FROM MARKDOWN"
+            if conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+            else "USE PDF"
+        )
+
+    def _refresh_review(self) -> None:
+        conflict = self._current_conflict()
+        self.query_one("#pdf-conflict-review-title", Static).update(
+            f"PDF conflict review - item {self.current_index + 1}/"
+            f"{len(self.items)} - {len(self.decisions)}/{len(self.items)} decided"
+        )
+        if conflict is None:
+            self.query_one("#pdf-conflict-review-detail", Static).update(
+                "No conflicts need review."
+            )
+            return
+        decision = self.decisions.get(conflict.annotation_id)
+        deleted = conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+        keep_markdown = self.query_one("#keep-markdown-conflict", Button)
+        keep_pdf = self.query_one("#keep-pdf-conflict", Button)
+        keep_markdown.label = "Restore PDF" if deleted else "Use Markdown"
+        keep_pdf.label = "Delete MD" if deleted else "Use PDF"
+        sidecar_range = (
+            f"[{conflict.sidecar_start}, {conflict.sidecar_end})"
+            if conflict.sidecar_start is not None
+            and conflict.sidecar_end is not None
+            else "unavailable"
+        )
+        pdf_range = (
+            f"[{conflict.pdf_start}, {conflict.pdf_end})"
+            if conflict.pdf_start is not None and conflict.pdf_end is not None
+            else "deleted"
+        )
+        pdf_confidence = (
+            f" - mapping ~{conflict.mapping_confidence}%"
+            if conflict.mapping_confidence is not None
+            else ""
+        )
+        detail = "\n".join(
+            (
+                f"#{conflict.ordinal} - {conflict.kind.value} - "
+                f"{self._decision_label(conflict, decision)} - "
+                f"id {conflict.annotation_id}",
+                f"Markdown {sidecar_range}: "
+                f"{_compact_conflict_text(conflict.sidecar_quote)} - note: "
+                f"{_compact_conflict_text(conflict.sidecar_note)}",
+                f"PDF {pdf_range}{pdf_confidence}: "
+                f"{_compact_conflict_text(conflict.pdf_quote)} - note: "
+                f"{_compact_conflict_text(conflict.pdf_note)}",
+                (
+                    "Restore PDF keeps this Markdown record and writes it back; "
+                    "Delete MD accepts the PDF deletion."
+                    if deleted
+                    else "Use Markdown writes its range/note into the PDF; "
+                    "Use PDF replaces the Markdown record."
+                ),
+            )
+        )
+        self.query_one("#pdf-conflict-review-detail", Static).update(detail)
+        if self.preview_callback is not None:
+            self.preview_callback(conflict)
+
+    def action_next_conflict(self) -> None:
+        if self.items:
+            self.current_index = (self.current_index + 1) % len(self.items)
+            self._refresh_review()
+
+    def action_previous_conflict(self) -> None:
+        if self.items:
+            self.current_index = (self.current_index - 1) % len(self.items)
+            self._refresh_review()
+
+    def _choose(self, decision: PdfConflictDecision) -> None:
+        conflict = self._current_conflict()
+        if conflict is None:
+            return
+        self.decisions[conflict.annotation_id] = decision
+        self._refresh_review()
+
+    def action_keep_markdown(self) -> None:
+        self._choose(PdfConflictDecision.KEEP_MARKDOWN)
+
+    def action_keep_pdf(self) -> None:
+        self._choose(PdfConflictDecision.KEEP_PDF)
+
+    def _resolutions(self) -> tuple[PdfConflictResolution, ...]:
+        return tuple(
+            PdfConflictResolution(
+                conflict.annotation_id,
+                self.decisions[conflict.annotation_id],
+            )
+            for conflict in self.items
+            if conflict.annotation_id in self.decisions
+        )
+
+    def action_continue_to_confirmation(self) -> None:
+        if len(self.decisions) != len(self.items):
+            self.notify(
+                "Choose the PDF or Markdown result for every conflict",
+                severity="warning",
+                timeout=2,
+            )
+            return
+        self.dismiss(self._resolutions())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#previous-pdf-conflict")
+    def on_previous_pressed(self, _event: Button.Pressed) -> None:
+        self.action_previous_conflict()
+
+    @on(Button.Pressed, "#next-pdf-conflict")
+    def on_next_pressed(self, _event: Button.Pressed) -> None:
+        self.action_next_conflict()
+
+    @on(Button.Pressed, "#keep-markdown-conflict")
+    def on_keep_markdown_pressed(self, _event: Button.Pressed) -> None:
+        self.action_keep_markdown()
+
+    @on(Button.Pressed, "#keep-pdf-conflict")
+    def on_keep_pdf_pressed(self, _event: Button.Pressed) -> None:
+        self.action_keep_pdf()
+
+    @on(Button.Pressed, "#continue-pdf-conflicts")
+    def on_continue_pressed(self, _event: Button.Pressed) -> None:
+        self.action_continue_to_confirmation()
+
+    @on(Button.Pressed, "#cancel-pdf-conflict-review")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
+class PdfConflictConfirmModal(ModalScreen[Optional[str]]):
+    """Final compact confirmation before applying reviewed PDF choices."""
+
+    CSS = """
+    PdfConflictConfirmModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #pdf-conflict-confirm-dialog {
+        width: 96%;
+        max-width: 120;
+        height: 11;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #pdf-conflict-confirm-title {
+        height: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #pdf-conflict-confirm-message {
+        height: 1fr;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    #pdf-conflict-confirm-hint {
+        height: 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+
+    #pdf-conflict-confirm-buttons {
+        height: 3;
+        grid-size: 5 1;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr;
+        grid-rows: 3;
+        grid-gutter: 0 1;
+    }
+
+    #pdf-conflict-confirm-buttons Button {
+        width: 1fr;
+        min-width: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("j,down", "next_resolution", "Next", priority=True, show=False),
+        Binding("k,up", "previous_resolution", "Previous", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(
+        self,
+        report: PdfConflictReport,
+        resolutions: tuple[PdfConflictResolution, ...],
+        preview_callback: Optional[PdfConflictPreviewCallback] = None,
+    ) -> None:
+        super().__init__()
+        self.report = report
+        self.resolutions = resolutions
+        self.preview_callback = preview_callback
+        self.current_index = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pdf-conflict-confirm-dialog"):
+            yield Static("", markup=False, id="pdf-conflict-confirm-title")
+            yield Static("", markup=False, id="pdf-conflict-confirm-message")
+            yield Static(
+                "A sidecar backup is created - files are changed only after Apply",
+                markup=False,
+                id="pdf-conflict-confirm-hint",
+            )
+            with Grid(id="pdf-conflict-confirm-buttons"):
+                yield Button("Cancel", id="cancel-pdf-conflict-confirm")
+                yield Button("<- Decision", id="previous-pdf-resolution")
+                yield Button("Decision ->", id="next-pdf-resolution")
+                yield Button("Review", id="review-pdf-conflicts-again")
+                yield Button(
+                    "Apply",
+                    variant="warning",
+                    id="apply-pdf-conflicts",
+                )
+
+    def on_mount(self) -> None:
+        self._refresh_confirmation()
+        self.query_one("#cancel-pdf-conflict-confirm", Button).focus()
+
+    def _current_pair(
+        self,
+    ) -> tuple[Optional[PdfAnnotationConflict], Optional[PdfConflictResolution]]:
+        if not self.resolutions:
+            return None, None
+        resolution = self.resolutions[self.current_index]
+        conflict = next(
+            (
+                item
+                for item in self.report.conflicts
+                if item.annotation_id == resolution.annotation_id
+            ),
+            None,
+        )
+        return conflict, resolution
+
+    def _refresh_confirmation(self) -> None:
+        markdown_count = sum(
+            resolution.decision is PdfConflictDecision.KEEP_MARKDOWN
+            for resolution in self.resolutions
+        )
+        pdf_count = len(self.resolutions) - markdown_count
+        self.query_one("#pdf-conflict-confirm-title", Static).update(
+            f"Apply PDF conflict decisions? - {self.current_index + 1}/"
+            f"{len(self.resolutions)} - Markdown wins: {markdown_count} - "
+            f"PDF wins: {pdf_count}"
+        )
+        conflict, resolution = self._current_pair()
+        if conflict is None or resolution is None:
+            detail = "No conflict decision is available."
+        else:
+            deleted = conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+            if resolution.decision is PdfConflictDecision.KEEP_MARKDOWN:
+                action = "restore annotation into PDF" if deleted else "write Markdown version into PDF"
+            else:
+                action = "delete Markdown record" if deleted else "replace Markdown with PDF version"
+            confidence = (
+                f"PDF geometry mapping: ~{conflict.mapping_confidence}%."
+                if conflict.mapping_confidence is not None
+                else "PDF annotation is absent; this is a deletion decision."
+            )
+            detail = (
+                f"#{conflict.ordinal} - {conflict.annotation_id}\n"
+                f"Decision: {action}. {confidence}\n"
+                f"Markdown note: {_compact_conflict_text(conflict.sidecar_note)}\n"
+                f"PDF note: {_compact_conflict_text(conflict.pdf_note)}"
+            )
+            if self.preview_callback is not None:
+                self.preview_callback(conflict)
+        self.query_one("#pdf-conflict-confirm-message", Static).update(detail)
+
+    def action_next_resolution(self) -> None:
+        if self.resolutions:
+            self.current_index = (self.current_index + 1) % len(self.resolutions)
+            self._refresh_confirmation()
+
+    def action_previous_resolution(self) -> None:
+        if self.resolutions:
+            self.current_index = (self.current_index - 1) % len(self.resolutions)
+            self._refresh_confirmation()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#previous-pdf-resolution")
+    def on_previous_pressed(self, _event: Button.Pressed) -> None:
+        self.action_previous_resolution()
+
+    @on(Button.Pressed, "#next-pdf-resolution")
+    def on_next_pressed(self, _event: Button.Pressed) -> None:
+        self.action_next_resolution()
+
+    @on(Button.Pressed, "#review-pdf-conflicts-again")
+    def on_review_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss("review")
+
+    @on(Button.Pressed, "#apply-pdf-conflicts")
+    def on_apply_pressed(self, _event: Button.Pressed) -> None:
+        self.dismiss("apply")
+
+    @on(Button.Pressed, "#cancel-pdf-conflict-confirm")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
 
 
 class RematchReviewModal(ModalScreen[Optional[tuple[RematchChoice, ...]]]):
@@ -3335,6 +3795,10 @@ class ViewerApp(App[None]):
         self._search_matches: dict[str, AnnotationRange] = {}
         self._pending_rematch_report: Optional[RematchReport] = None
         self._pending_rematch_choices: tuple[RematchChoice, ...] = ()
+        self._pending_pdf_conflict_report: Optional[PdfConflictReport] = None
+        self._pending_pdf_conflict_resolutions: tuple[
+            PdfConflictResolution, ...
+        ] = ()
         self._pending_manual_range: Optional[AnnotationRange] = None
         self._rematch_preview_state: Optional[RematchPreviewState] = None
         self._pending_menu_link: Optional[AnnotationLink] = None
@@ -3342,6 +3806,10 @@ class ViewerApp(App[None]):
         self._suspend_alignment = False
         self.demo_case: Optional[DemoCase] = None
         self._demo_case_error: Optional[str] = None
+        self._initial_pdf_sync_error: Optional[str] = None
+        self._initial_pdf_conflict_report: Optional[
+            PdfConflictReport
+        ] = None
         self._demo_reset_complete = False
         try:
             self.demo_case = load_demo_case(source.path)
@@ -3349,6 +3817,20 @@ class ViewerApp(App[None]):
             self._demo_case_error = str(error)
         self.sync_mode = SyncMode.NORMAL
         self.annotation_store = annotation_store or AnnotationStore(source.path)
+        if source.source_kind == "pdf":
+            try:
+                import_pdf_text_markups(
+                    source.path,
+                    annotations_path=self.annotation_store.path,
+                    loaded_source=source,
+                )
+            except PdfImportConflictError as error:
+                self._initial_pdf_conflict_report = error.report
+                self._initial_pdf_sync_error = (
+                    f"{error}. Press R to review the conflicts."
+                )
+            except PdfImportError as error:
+                self._initial_pdf_sync_error = str(error)
         try:
             self.annotation_text = self.annotation_store.read_text()
         except AnnotationFileError as error:
@@ -3407,9 +3889,21 @@ class ViewerApp(App[None]):
         self.query_one("#viewer", VimTextArea).focus()
         self._refresh_status()
         self.call_after_refresh(self._restore_initial_source_cursor)
+        if self._initial_pdf_conflict_report is not None:
+            self.call_after_refresh(self._open_initial_pdf_conflict_review)
         if self._demo_case_error is not None:
             self.notify(
                 self._demo_case_error,
+                severity="warning",
+                timeout=6,
+            )
+        if (
+            self._initial_pdf_sync_error is not None
+            and self._initial_pdf_conflict_report is None
+        ):
+            self.notify(
+                "Could not reconcile PDF annotations on open: "
+                + self._initial_pdf_sync_error,
                 severity="warning",
                 timeout=6,
             )
@@ -3544,12 +4038,12 @@ class ViewerApp(App[None]):
             )
             if current is not None:
                 current_index = ordered.index(current)
-                target_index = (current_index + direction) % len(ordered)
-                wrapped = (
-                    direction > 0 and target_index <= current_index
-                    or direction < 0 and target_index >= current_index
+                target_index = current_index + direction
+                destination = (
+                    ordered[target_index]
+                    if 0 <= target_index < len(ordered)
+                    else None
                 )
-                destination = ordered[target_index]
             else:
                 candidates = (
                     tuple(
@@ -3566,10 +4060,13 @@ class ViewerApp(App[None]):
                 )
                 if candidates:
                     destination = candidates[0] if direction > 0 else candidates[-1]
-                    wrapped = False
                 else:
-                    destination = ordered[0] if direction > 0 else ordered[-1]
-                    wrapped = True
+                    destination = None
+
+            if destination is None:
+                boundary = "last" if direction > 0 else "first"
+                self.notify(f"Already at {boundary} annotation", timeout=1.25)
+                return
 
             if target.visual_mode:
                 target.action_cancel_visual()
@@ -3601,12 +4098,12 @@ class ViewerApp(App[None]):
             )
             if current is not None:
                 current_index = ordered.index(current)
-                target_index = (current_index + direction) % len(ordered)
-                wrapped = (
-                    direction > 0 and target_index <= current_index
-                    or direction < 0 and target_index >= current_index
+                target_index = current_index + direction
+                destination = (
+                    ordered[target_index]
+                    if 0 <= target_index < len(ordered)
+                    else None
                 )
-                destination = ordered[target_index]
             else:
                 candidates = (
                     tuple(
@@ -3623,10 +4120,13 @@ class ViewerApp(App[None]):
                 )
                 if candidates:
                     destination = candidates[0] if direction > 0 else candidates[-1]
-                    wrapped = False
                 else:
-                    destination = ordered[0] if direction > 0 else ordered[-1]
-                    wrapped = True
+                    destination = None
+
+            if destination is None:
+                boundary = "last" if direction > 0 else "first"
+                self.notify(f"Already at {boundary} annotation", timeout=1.25)
+                return
 
             target.show_link(
                 destination,
@@ -3646,9 +4146,6 @@ class ViewerApp(App[None]):
             return
 
         self._refresh_status()
-        if wrapped:
-            boundary = "first" if direction > 0 else "last"
-            self.notify(f"Wrapped to {boundary} annotation", timeout=1.25)
 
     def action_next_annotation(self) -> None:
         self._navigate_annotation(1)
@@ -3824,7 +4321,7 @@ class ViewerApp(App[None]):
         )
 
     def _embed_pdf_annotations_from_menu(self) -> None:
-        """Manually refresh the derived annotated PDF from saved records."""
+        """Manually synchronize saved records into the source PDF."""
 
         if self.source.source_kind != "pdf":
             self.notify(
@@ -4322,6 +4819,281 @@ class ViewerApp(App[None]):
     def _resume_alignment(self) -> None:
         self._suspend_alignment = False
 
+    def _open_initial_pdf_conflict_review(self) -> None:
+        """Immediately expose conflicts detected while opening a PDF pair."""
+
+        report = self._initial_pdf_conflict_report
+        if report is None:
+            return
+        self._initial_pdf_conflict_report = None
+        self._pending_pdf_conflict_report = report
+        self._pending_pdf_conflict_resolutions = ()
+        self._capture_rematch_preview_state()
+        self.push_screen(
+            PdfConflictReviewModal(
+                report,
+                preview_callback=self._preview_pdf_conflict,
+            ),
+            callback=self._finish_pdf_conflict_review,
+        )
+
+    def _preview_pdf_conflict(self, conflict: PdfAnnotationConflict) -> None:
+        """Reveal a PDF/Markdown conflict in both panes behind its modal."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer.visual_mode = False
+        viewer.selection = Selection.cursor(viewer.cursor_location)
+        start = (
+            conflict.pdf_start
+            if conflict.pdf_start is not None
+            else conflict.sidecar_start
+        )
+        end = (
+            conflict.pdf_end
+            if conflict.pdf_end is not None
+            else conflict.sidecar_end
+        )
+        preview_range = (
+            AnnotationRange(start, end)
+            if start is not None
+            and end is not None
+            and 0 <= start < end <= len(viewer.text)
+            else None
+        )
+        viewer.set_rematch_candidate_range(preview_range)
+        if preview_range is not None:
+            viewer.move_cursor(
+                self._source_location_for_offset(preview_range.start)
+            )
+            _position_cursor_line(viewer, "top")
+
+        record = next(
+            (
+                item
+                for item in parse_annotation_records(annotator.canonical_text)
+                if item.annotation_id == conflict.annotation_id
+            ),
+            None,
+        )
+        if record is None:
+            annotator.clear_active_link()
+            return
+        record_line = annotator.canonical_text.count(
+            "\n", 0, record.block_start
+        )
+        link = next(
+            (
+                annotation_link
+                for annotation_link in self.annotation_links
+                if annotation_link.sidecar_start_line == record_line
+            ),
+            None,
+        )
+        if link is None:
+            annotator.clear_active_link()
+            preview_line = record_line
+        else:
+            annotator.show_link(link, move_cursor=False)
+            preview_line = (
+                link.sidecar_quote_start_line
+                if link.sidecar_quote_start_line is not None
+                else link.sidecar_note_line
+            )
+        annotator.move_cursor(
+            (annotator._display_line_for_full(preview_line), 0)
+        )
+        _position_cursor_line(annotator, "top")
+
+    def _replace_annotation_document(self, saved: str) -> None:
+        """Load one externally reconciled sidecar into the live annotation pane."""
+
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer = self.query_one("#viewer", VimTextArea)
+        full_cursor = annotator._full_cursor_location()
+        viewport_position = annotator._cursor_viewport_position()
+        self.annotation_text = saved
+        self._saved_annotation_text = saved
+        self.annotation_links = parse_annotation_links(saved)
+        self.annotation_ranges = tuple(
+            link.source_range for link in self.annotation_links
+        )
+        annotator.load_annotation_text(saved)
+        annotator.set_annotation_links(self.annotation_links)
+        display_row = annotator._display_line_for_full(full_cursor[0])
+        display_lines = annotator.text.split("\n")
+        display_row = max(0, min(display_row, len(display_lines) - 1))
+        display_line = display_lines[display_row] if display_lines else ""
+        annotator.move_cursor(
+            (display_row, min(full_cursor[1], len(display_line)))
+        )
+        annotator._restore_cursor_viewport_position(viewport_position)
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        self._set_search_match("annotator", None)
+
+    def _review_pdf_conflicts_before_text_rematch(self) -> bool:
+        """Open conflict review when PDF reconciliation needs user choices."""
+
+        if self.source.source_kind != "pdf":
+            return False
+        viewer = self.query_one("#viewer", VimTextArea)
+        try:
+            current_source = load_source_file(self.source.path)
+        except TextFileError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return True
+        if current_source.text != viewer.text:
+            self.notify(
+                "The PDF text changed while the viewer was open; reopen it "
+                "before rematching",
+                severity="warning",
+                timeout=5,
+            )
+            return True
+        try:
+            import_pdf_text_markups(
+                current_source.path,
+                annotations_path=self.annotation_store.path,
+                loaded_source=current_source,
+            )
+        except PdfImportConflictError as error:
+            self._pending_pdf_conflict_report = error.report
+            self._pending_pdf_conflict_resolutions = ()
+            self._capture_rematch_preview_state()
+            self.push_screen(
+                PdfConflictReviewModal(
+                    error.report,
+                    preview_callback=self._preview_pdf_conflict,
+                ),
+                callback=self._finish_pdf_conflict_review,
+            )
+            return True
+        except PdfImportError as error:
+            self.notify(
+                f"Could not scan PDF annotation conflicts: {error}",
+                severity="error",
+                timeout=6,
+            )
+            return True
+
+        self.source = current_source
+        self._saved_source = current_source
+        try:
+            refreshed = self.annotation_store.read_text()
+        except AnnotationFileError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return True
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        if refreshed != annotator.canonical_text:
+            self._replace_annotation_document(refreshed)
+        self._initial_pdf_sync_error = None
+        self._refresh_titlebar()
+        return False
+
+    def _finish_pdf_conflict_review(
+        self,
+        resolutions: Optional[tuple[PdfConflictResolution, ...]],
+    ) -> None:
+        report = self._pending_pdf_conflict_report
+        if resolutions is None or report is None:
+            self._restore_rematch_preview()
+            self._pending_pdf_conflict_report = None
+            self._pending_pdf_conflict_resolutions = ()
+            self._rematch_preview_state = None
+            self._refresh_status()
+            return
+        self._pending_pdf_conflict_resolutions = resolutions
+        self.push_screen(
+            PdfConflictConfirmModal(
+                report,
+                resolutions,
+                preview_callback=self._preview_pdf_conflict,
+            ),
+            callback=self._finish_pdf_conflict_confirmation,
+        )
+
+    def _finish_pdf_conflict_confirmation(self, choice: Optional[str]) -> None:
+        report = self._pending_pdf_conflict_report
+        resolutions = self._pending_pdf_conflict_resolutions
+        if report is None:
+            return
+        if choice == "review":
+            self.push_screen(
+                PdfConflictReviewModal(
+                    report,
+                    resolutions,
+                    preview_callback=self._preview_pdf_conflict,
+                ),
+                callback=self._finish_pdf_conflict_review,
+            )
+            return
+        if choice != "apply":
+            self._restore_rematch_preview()
+            self._pending_pdf_conflict_report = None
+            self._pending_pdf_conflict_resolutions = ()
+            self._rematch_preview_state = None
+            self._refresh_status()
+            return
+        self._restore_rematch_preview()
+        self._rematch_preview_state = None
+        self._apply_pdf_conflict_resolutions(report, resolutions)
+
+    def _apply_pdf_conflict_resolutions(
+        self,
+        report: PdfConflictReport,
+        resolutions: tuple[PdfConflictResolution, ...],
+    ) -> None:
+        """Apply a confirmed conflict batch and reload the canonical pair."""
+
+        if self._dirty_panes():
+            self.notify(
+                "Buffers changed after conflict review; press R to scan again",
+                severity="warning",
+                timeout=4,
+            )
+            return
+        try:
+            result = resolve_pdf_annotation_conflicts(
+                self.source.path,
+                report,
+                resolutions,
+                annotations_path=self.annotation_store.path,
+            )
+            refreshed_source = load_source_file(self.source.path)
+            refreshed_annotations = self.annotation_store.read_text()
+        except (PdfImportError, TextFileError, AnnotationFileError) as error:
+            self._pending_pdf_conflict_report = None
+            self._pending_pdf_conflict_resolutions = ()
+            self.notify(str(error), severity="error", timeout=7)
+            return
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        self.source = refreshed_source
+        self._saved_source = refreshed_source
+        if refreshed_source.text != viewer.text:
+            viewer.load_text(refreshed_source.text)
+            viewer.clear_jump_history()
+            self._rebuild_source_line_starts()
+        self._replace_annotation_document(refreshed_annotations)
+        self._pending_pdf_conflict_report = None
+        self._pending_pdf_conflict_resolutions = ()
+        self._initial_pdf_sync_error = None
+        self._refresh_titlebar()
+        self._refresh_status()
+        backup = (
+            f" Backup: {result.backup_path.name}."
+            if result.backup_path is not None
+            else ""
+        )
+        self.notify(
+            f"Resolved {len(resolutions)} PDF annotation conflict(s): "
+            f"restored {len(result.restored_to_pdf)}, "
+            f"accepted from PDF {len(result.accepted_from_pdf)}."
+            + backup
+            + " Press R again for text rematches.",
+            timeout=7,
+        )
+
     def action_rematch_annotations(self) -> None:
         """Run a read-only scan and open review when stale records exist."""
 
@@ -4338,6 +5110,8 @@ class ViewerApp(App[None]):
                 severity="warning",
                 timeout=3,
             )
+            return
+        if self._review_pdf_conflicts_before_text_rematch():
             return
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
@@ -4742,7 +5516,7 @@ class ViewerApp(App[None]):
         source: Optional[LoadedTextFile] = None,
         manual: bool = False,
     ) -> None:
-        """Refresh the derived PDF copy after saving or an explicit menu action."""
+        """Synchronize the source PDF after saving or an explicit menu action."""
 
         current_source = self.source if source is None else source
         if current_source.source_kind != "pdf":
@@ -4771,7 +5545,7 @@ class ViewerApp(App[None]):
         )
         if receipt is not None:
             self.notify(
-                f"Annotated PDF already current: {output_path.name}",
+                f"PDF and sidecar already synchronized: {output_path.name}",
                 timeout=2,
             )
             return
@@ -4784,10 +5558,10 @@ class ViewerApp(App[None]):
             )
         except PdfEmbedError as error:
             message = (
-                f"Could not refresh annotated PDF: {error}"
+                f"Could not synchronize source PDF: {error}"
                 if manual
-                else "Annotations were saved, but the annotated PDF could not "
-                f"be refreshed: {error}"
+                else "Annotations were saved, but the source PDF could not "
+                f"be synchronized: {error}"
             )
             self.notify(
                 message,
@@ -4795,8 +5569,46 @@ class ViewerApp(App[None]):
                 timeout=6,
             )
             return
+
+        try:
+            refreshed_source = load_source_file(current_source.path)
+            refreshed_annotations = self.annotation_store.read_text()
+        except (TextFileError, AnnotationFileError) as error:
+            self.notify(
+                "PDF was synchronized, but the refreshed pair could not be "
+                f"loaded: {error}",
+                severity="error",
+                timeout=6,
+            )
+            return
+
+        self.source = refreshed_source
+        self._saved_source = refreshed_source
+        if refreshed_annotations != self._saved_annotation_text:
+            annotator = self.query_one("#annotator", AnnotationTextArea)
+            viewer = self.query_one("#viewer", VimTextArea)
+            full_cursor = annotator._full_cursor_location()
+            viewport_position = annotator._cursor_viewport_position()
+            self.annotation_text = refreshed_annotations
+            self._saved_annotation_text = refreshed_annotations
+            self.annotation_links = parse_annotation_links(refreshed_annotations)
+            self.annotation_ranges = tuple(
+                link.source_range for link in self.annotation_links
+            )
+            annotator.load_annotation_text(refreshed_annotations)
+            annotator.set_annotation_links(self.annotation_links)
+            display_row = annotator._display_line_for_full(full_cursor[0])
+            display_lines = annotator.text.split("\n")
+            display_line = display_lines[display_row] if display_lines else ""
+            annotator.move_cursor(
+                (display_row, min(full_cursor[1], len(display_line)))
+            )
+            annotator._restore_cursor_viewport_position(viewport_position)
+            viewer.set_annotation_ranges(self.annotation_ranges)
+            self._set_search_match("annotator", None)
+        self._refresh_titlebar()
         self.notify(
-            f"Refreshed annotated PDF: {result.output_path.name}",
+            f"Synchronized source PDF: {result.output_path.name}",
             timeout=3,
         )
 

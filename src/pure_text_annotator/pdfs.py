@@ -10,7 +10,7 @@ import math
 import os
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -67,7 +67,7 @@ class PdfPage:
 
 @dataclass(frozen=True)
 class PdfDocument:
-    """The canonical extracted-text projection of one immutable PDF."""
+    """The canonical extracted-text projection of one exact PDF revision."""
 
     document_sha256: str
     extractor_name: str
@@ -795,3 +795,44 @@ def load_pdf_file(
             source_size_bytes=len(raw),
         )
     return loaded
+
+
+def rebind_loaded_pdf(
+    source: LoadedTextFile,
+    *,
+    use_cache: bool = True,
+    cache_dir: Optional[PathInput] = None,
+) -> LoadedTextFile:
+    """Bind verified unchanged text geometry to the PDF's current bytes.
+
+    PDF annotation edits change the whole-file hash without changing page text
+    or its coordinates. Callers must first verify that page content and page
+    geometry are unchanged (the embedding pipeline does this before replacing
+    a source PDF). The rebound projection is also cached under the new exact
+    byte hash so reopening an annotation-only revision stays fast.
+    """
+
+    if source.source_kind != "pdf" or source.pdf_document is None:
+        raise TextFileError("source does not provide PDF geometry")
+    try:
+        raw = source.path.read_bytes()
+    except OSError as error:
+        raise TextFileError(f"cannot read {source.path}: {error}") from error
+    document_sha256 = hashlib.sha256(raw).hexdigest()
+    document = replace(
+        source.pdf_document,
+        document_sha256=document_sha256,
+    )
+    rebound = replace(
+        source,
+        size_bytes=len(raw),
+        pdf_document=document,
+    )
+    if use_cache:
+        _store_pdf_cache(
+            pdf_cache_path(document_sha256, cache_dir),
+            text=source.text,
+            document=document,
+            source_size_bytes=len(raw),
+        )
+    return rebound

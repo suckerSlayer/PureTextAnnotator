@@ -1,8 +1,10 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject
 from textual.widgets import Static
 
 from pure_text_annotator.annotations import (
@@ -13,11 +15,14 @@ from pure_text_annotator.annotations import (
 from pure_text_annotator.app import (
     AnnotationTextArea,
     DemoResetModal,
+    PdfConflictConfirmModal,
+    PdfConflictReviewModal,
     RematchConfirmModal,
     RematchReviewModal,
     VimTextArea,
     ViewerApp,
 )
+from pure_text_annotator.embed import embed_pdf_annotations
 from pure_text_annotator.files import load_source_file, load_text_file
 from pure_text_annotator.rematch import parse_annotation_records
 
@@ -62,6 +67,93 @@ def test_annotation_menu_opens_rematch_review(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_rematch_reviews_deleted_pdf_annotation_and_can_restore_it(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = write_text_pdf(
+            tmp_path / "paper.pdf", ("Alpha unique target omega",)
+        )
+        original = load_source_file(source_path)
+        assert original.pdf_document is not None
+        start = original.text.index("unique target")
+        end = start + len("unique target")
+        anchor = original.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(start, end, "unique target"),
+                "Original PDF note.",
+                annotation_id="deleted-pdf-note",
+                source_text=original.text,
+                pdf_anchor=anchor,
+            )
+        )
+        embed_pdf_annotations(source_path)
+        store.path.write_text(
+            store.path.read_text(encoding="utf-8").replace(
+                "Original PDF note.", "Edited Markdown note."
+            ),
+            encoding="utf-8",
+        )
+
+        reader = PdfReader(source_path)
+        writer = PdfWriter()
+        writer.clone_document_from_reader(reader)
+        del writer.pages[0][NameObject("/Annots")]
+        with source_path.open("wb") as stream:
+            writer.write(stream)
+        writer.close()
+        deleted_pdf_bytes = source_path.read_bytes()
+        conflicted_sidecar_bytes = store.path.read_bytes()
+
+        app = ViewerApp(
+            load_source_file(source_path),
+            clipboard_writer=lambda _text: "test",
+        )
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, PdfConflictReviewModal)
+            await pilot.click("#cancel-pdf-conflict-review")
+            await pilot.pause()
+            assert not isinstance(app.screen, PdfConflictReviewModal)
+            assert source_path.read_bytes() == deleted_pdf_bytes
+            assert store.path.read_bytes() == conflicted_sidecar_bytes
+
+            await pilot.press("shift+r")
+            await pilot.pause()
+            assert isinstance(app.screen, PdfConflictReviewModal)
+            detail = app.screen.query_one(
+                "#pdf-conflict-review-detail", Static
+            ).render().plain
+            assert "deleted-from-pdf" in detail
+            assert "Edited Markdown note." in detail
+            viewer = app.query_one("#viewer", VimTextArea)
+            assert viewer.rematch_candidate_range is not None
+
+            await pilot.click("#keep-markdown-conflict")
+            await pilot.click("#continue-pdf-conflicts")
+            await pilot.pause()
+            assert isinstance(app.screen, PdfConflictConfirmModal)
+            await pilot.click("#apply-pdf-conflicts")
+            await pilot.pause()
+
+            annotations = tuple(
+                item.get_object()
+                for item in PdfReader(source_path).pages[0][
+                    "/Annots"
+                ].get_object()
+            )
+            assert len(annotations) == 1
+            assert annotations[0]["/NM"] == "deleted-pdf-note"
+            assert annotations[0]["/Contents"] == "Edited Markdown note."
+            assert "Edited Markdown note." in store.read_text()
+            assert list(tmp_path.glob("*.before-pdf-conflict-*"))
+
+    asyncio.run(scenario())
+
+
 def test_pdf_rematch_apply_refreshes_geometry_anchor(tmp_path: Path) -> None:
     async def scenario() -> None:
         source_path = write_text_pdf(
@@ -99,10 +191,12 @@ def test_pdf_rematch_apply_refreshes_geometry_anchor(tmp_path: Path) -> None:
             await pilot.pause()
 
             saved = store.path.read_text(encoding="utf-8")
-            assert current.pdf_document.document_sha256 in saved
+            synchronized_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+            assert synchronized_hash in saved
+            assert current.pdf_document.document_sha256 not in saved
             assert original.pdf_document.document_sha256 not in saved
             assert "    - page_index: 1" in saved
-            output_path = tmp_path / "paper.annotated.pdf"
+            output_path = source_path
             assert output_path.is_file()
             annotations = tuple(
                 item.get_object()

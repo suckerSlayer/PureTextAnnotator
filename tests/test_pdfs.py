@@ -393,7 +393,7 @@ def test_pdf_app_blocks_source_edit_and_saves_geometry_note(tmp_path: Path) -> N
         source = load_source_file(
             write_text_pdf(tmp_path / "paper.pdf", ("Alpha beta",))
         )
-        output_path = tmp_path / "paper.annotated.pdf"
+        output_path = source.path
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(120, 28)) as pilot:
@@ -454,7 +454,7 @@ def test_pdf_annotation_ctrl_s_refreshes_copy(tmp_path: Path) -> None:
                 pdf_anchor=anchor,
             )
         )
-        output_path = tmp_path / "paper.annotated.pdf"
+        output_path = source.path
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(110, 28)) as pilot:
@@ -512,16 +512,17 @@ def test_pdf_quit_without_annotation_save_does_not_embed(tmp_path: Path) -> None
                 pdf_anchor=anchor,
             )
         )
-        output_path = tmp_path / "paper.annotated.pdf"
+        source_before = source.path.read_bytes()
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(110, 28)) as pilot:
-            assert not output_path.exists()
+            assert source.path.read_bytes() == source_before
+            assert PdfReader(source.path).pages[0].get("/Annots") is None
             await pilot.press("q")
             await pilot.pause()
 
         assert app.quit_completed is True
-        assert not output_path.exists()
+        assert source.path.read_bytes() == source_before
 
     asyncio.run(scenario())
 
@@ -547,7 +548,7 @@ def test_pdf_annotation_menu_embeds_when_auto_embedding_is_disabled(
                 pdf_anchor=anchor,
             )
         )
-        output_path = tmp_path / "paper.annotated.pdf"
+        output_path = source.path
         app = ViewerApp(
             source,
             clipboard_writer=lambda _text: "test",
@@ -596,6 +597,7 @@ def test_pdf_menu_deletion_refreshes_embedded_copy(tmp_path: Path) -> None:
             )
         output_path = embed_pdf_annotations(source.path).output_path
         assert len(PdfReader(output_path).pages[0]["/Annots"]) == 2
+        source = load_source_file(source.path)
         app = ViewerApp(source, clipboard_writer=lambda _text: "test")
 
         async with app.run_test(size=(120, 28)) as pilot:

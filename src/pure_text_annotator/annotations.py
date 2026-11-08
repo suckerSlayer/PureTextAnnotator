@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 
 Location = Tuple[int, int]
@@ -84,6 +84,40 @@ class PdfAnchor:
 
 
 @dataclass(frozen=True)
+class PdfImportMetadata:
+    """Provenance retained when a PDF text-markup annotation is imported."""
+
+    version: int
+    source_document_sha256: str
+    fingerprint: str
+    subtype: str
+    page_index: int
+    annotation_name: Optional[str]
+    author: Optional[str]
+    subject: Optional[str]
+    creation_date: Optional[str]
+    modified_date: Optional[str]
+    mapping_confidence: int
+    generated_note: bool
+    color: Tuple[float, ...]
+    rect_pdf: PdfRectangle
+    quad_points_pdf: Tuple[PdfQuad, ...]
+
+
+@dataclass(frozen=True)
+class PdfSyncMetadata:
+    """Identity of a sidecar record confirmed to exist in its source PDF."""
+
+    version: int
+    origin: str
+    annotation_name: Optional[str]
+    fingerprint: str
+    last_seen_document_sha256: str
+    pdf_state_sha256: str
+    sidecar_state_sha256: str
+
+
+@dataclass(frozen=True)
 class AnnotationRecord:
     """One persistent note associated with a source range."""
 
@@ -100,6 +134,8 @@ class AnnotationRecord:
     original_start: Optional[int] = None
     original_end: Optional[int] = None
     pdf_anchor: Optional[PdfAnchor] = None
+    pdf_import: Optional[PdfImportMetadata] = None
+    pdf_sync: Optional[PdfSyncMetadata] = None
 
 
 def _pdf_number_list(values: Tuple[float, ...]) -> str:
@@ -149,6 +185,74 @@ def render_pdf_anchor(anchor: PdfAnchor) -> str:
             for quad in fragment.quad_points_pdf
         )
     return "\n".join(lines) + "\n"
+
+
+def render_pdf_import(metadata: PdfImportMetadata) -> str:
+    """Render deterministic provenance for one imported PDF annotation."""
+
+    optional_strings = (
+        ("annotation_name", metadata.annotation_name),
+        ("author", metadata.author),
+        ("subject", metadata.subject),
+        ("creation_date", metadata.creation_date),
+        ("modified_date", metadata.modified_date),
+    )
+    lines = [
+        "pdf_import:",
+        f"  version: {metadata.version}",
+        "  source_document_sha256: "
+        + json.dumps(metadata.source_document_sha256),
+        f"  fingerprint: {json.dumps(metadata.fingerprint)}",
+        f"  subtype: {json.dumps(metadata.subtype, ensure_ascii=False)}",
+        f"  page_index: {metadata.page_index}",
+    ]
+    lines.extend(
+        f"  {name}: "
+        + (
+            "null"
+            if value is None
+            else json.dumps(value, ensure_ascii=False)
+        )
+        for name, value in optional_strings
+    )
+    lines.extend(
+        [
+            f"  mapping_confidence: {metadata.mapping_confidence}",
+            "  generated_note: "
+            + ("true" if metadata.generated_note else "false"),
+            "  color: " + _pdf_number_list(metadata.color),
+            "  rect_pdf: " + _pdf_number_list(metadata.rect_pdf),
+            "  quad_points_pdf:",
+        ]
+    )
+    lines.extend(
+        "    - " + _pdf_number_list(quad)
+        for quad in metadata.quad_points_pdf
+    )
+    return "\n".join(lines) + "\n"
+
+
+def render_pdf_sync(metadata: PdfSyncMetadata) -> str:
+    """Render the durable PDF/sidecar identity used for reconciliation."""
+
+    return (
+        "pdf_sync:\n"
+        f"  version: {metadata.version}\n"
+        f"  origin: {json.dumps(metadata.origin)}\n"
+        "  annotation_name: "
+        + (
+            "null"
+            if metadata.annotation_name is None
+            else json.dumps(metadata.annotation_name, ensure_ascii=False)
+        )
+        + "\n"
+        f"  fingerprint: {json.dumps(metadata.fingerprint)}\n"
+        "  last_seen_document_sha256: "
+        f"{json.dumps(metadata.last_seen_document_sha256)}\n"
+        f"  pdf_state_sha256: {json.dumps(metadata.pdf_state_sha256)}\n"
+        "  sidecar_state_sha256: "
+        f"{json.dumps(metadata.sidecar_state_sha256)}\n"
+    )
 
 
 def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
@@ -360,7 +464,13 @@ def delete_annotation_block(
     else:
         updated = suffix
 
-    renumbered = updated.splitlines(keepends=True)
+    return renumber_annotation_headings(updated)
+
+
+def renumber_annotation_headings(annotation_text: str) -> str:
+    """Renumber structural ``## Annotation`` headings in document order."""
+
+    renumbered = annotation_text.splitlines(keepends=True)
     ordinal = 0
     waiting_for_heading = False
     for index, line in enumerate(renumbered):
@@ -414,6 +524,8 @@ def create_record(
     created_at: Optional[str] = None,
     source_text: Optional[str] = None,
     pdf_anchor: Optional[PdfAnchor] = None,
+    pdf_import: Optional[PdfImportMetadata] = None,
+    pdf_sync: Optional[PdfSyncMetadata] = None,
 ) -> AnnotationRecord:
     """Turn a selected range and note into a persistent record."""
 
@@ -448,6 +560,8 @@ def create_record(
         note=note.rstrip(),
         created_at=timestamp,
         pdf_anchor=pdf_anchor,
+        pdf_import=pdf_import,
+        pdf_sync=pdf_sync,
         **anchor,
     )
 
@@ -533,6 +647,16 @@ class AnnotationStore:
             if record.pdf_anchor is not None
             else ""
         )
+        pdf_import = (
+            render_pdf_import(record.pdf_import)
+            if record.pdf_import is not None
+            else ""
+        )
+        pdf_sync = (
+            render_pdf_sync(record.pdf_sync)
+            if record.pdf_sync is not None
+            else ""
+        )
         return (
             f"{self.MARKER}id={annotation_id} -->\n"
             f"## Annotation {ordinal}\n\n"
@@ -545,6 +669,8 @@ class AnnotationStore:
             f"created_at: {created_at}\n"
             f"{anchor}"
             f"{pdf_anchor}"
+            f"{pdf_import}"
+            f"{pdf_sync}"
             "```\n\n"
             "### Original text\n\n"
             f"{quote}\n\n"
@@ -552,6 +678,11 @@ class AnnotationStore:
             f"{record.note}\n\n"
             "<!-- /pta:annotation -->\n"
         )
+
+    def render_record(self, record: AnnotationRecord, ordinal: int) -> str:
+        """Render one canonical record block for transactional reconciliation."""
+
+        return self._render_record(record, ordinal)
 
     @staticmethod
     def _with_blank_line(text: str) -> str:
@@ -564,9 +695,35 @@ class AnnotationStore:
     def append(self, record: AnnotationRecord) -> str:
         """Append a record atomically and return the complete saved document."""
 
+        return self.append_many((record,))
+
+    def append_many(
+        self,
+        records: Sequence[AnnotationRecord],
+        *,
+        expected_text: Optional[str] = None,
+        base_text: Optional[str] = None,
+    ) -> str:
+        """Append several records with one all-or-nothing sidecar replacement."""
+
         current = self.read_text()
-        ordinal = current.count(self.MARKER) + 1
-        updated = self._with_blank_line(current) + self._render_record(record, ordinal)
+        if expected_text is not None and current != expected_text:
+            raise AnnotationFileError(
+                "annotation sidecar changed while records were being prepared"
+            )
+        base = current if base_text is None else base_text
+        if not records and base == current:
+            return current
+        first_ordinal = base.count(self.MARKER) + 1
+        rendered = "\n\n".join(
+            self._render_record(record, first_ordinal + offset).rstrip("\n")
+            for offset, record in enumerate(records)
+        )
+        updated = (
+            self._with_blank_line(base) + rendered + "\n"
+            if records
+            else base
+        )
         self._atomic_write(updated)
         return updated
 

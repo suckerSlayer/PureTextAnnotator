@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 pta-embed = "pure_text_annotator.embed_cli:main"
+pta-import = "pure_text_annotator.import_cli:main"
 pta-view = "pure_text_annotator.cli:main"
 
 [tool.setuptools.packages.find]
