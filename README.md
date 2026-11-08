@@ -38,11 +38,13 @@ text in the extractor's top-to-bottom, left-to-right reading order. Search,
 Vim-style movement, selection, copy, annotation, alignment, and rematching then
 use the same interface as text and Markdown files.
 
-The PDF itself is immutable: pressing `i` in the PDF source pane shows a
-read-only warning instead of opening Edit mode. The annotation pane remains
-editable, and notes are saved beside `paper.pdf` as
-`paper.pdf.annotations.md`. A PDF with no extractable text layer is rejected
-with a clear message; OCR and a rendered page view are not part of this version.
+The PDF page content remains read-only: pressing `i` in the PDF source pane
+shows a warning instead of opening Edit mode. Its standard annotation layer is
+mutable and is synchronized with the editable Markdown sidecar saved beside
+`paper.pdf` as `paper.pdf.annotations.md`. The source PDF and that sidecar are
+the canonical pair; `.annotated.pdf` files are no longer the default working
+document. A PDF with no extractable text layer is rejected with a clear
+message; OCR and a rendered page view are not part of this version.
 
 Every PDF annotation stores two complementary anchors:
 
@@ -55,6 +57,71 @@ Every PDF annotation stores two complementary anchors:
 Multi-page selections create one geometry fragment per page. Coordinates use
 PDF user space with a bottom-left origin. Geometry is valid only for the exact
 recorded PDF hash.
+
+### Import existing PDF text markup
+
+Use `pta-import` to reconcile editable text-markup annotations created by
+Preview, Acrobat, Pure Text Annotator, or another standards-compatible PDF
+program into the Markdown sidecar:
+
+```bash
+pta-import path/to/reviewed.pdf
+pta-import path/to/reviewed.pdf \
+  --annotations path/to/notes.md
+```
+
+The importer supports `/Highlight`, `/Underline`, `/Squiggly`, and
+`/StrikeOut`. It maps each annotation's `/QuadPoints` onto the same extracted
+character geometry used by the viewer. Only continuous text matches at or above
+the conservative confidence threshold are imported. Standalone notes, free
+text, drawings, stamps, links, and flattened page graphics are reported as
+unsupported and left unchanged.
+
+Each imported record contains the recovered Unicode range and quotation, normal
+text and PDF anchors, mapping confidence, subtype, external annotation name,
+author, subject, dates, color, original rectangle and quad points, source-PDF
+hash, and a stable import fingerprint. `pdf_sync` metadata records the durable
+identity confirmed in the PDF. A markup annotation with no `/Contents` comment
+receives a visibly generated note such as
+`Imported PDF highlight without a comment` so the note-based sidecar remains
+valid.
+
+Reconciliation is bidirectional and identity-aware. New PDF markup is appended,
+and changed range or comment data replaces the corresponding sidecar block.
+Deleting a previously confirmed annotation from the PDF is never propagated
+silently: the sidecar record remains until the user chooses **Restore PDF** or
+**Delete MD** in `pta-view`'s `R` review. A sidecar-only record that has never
+been embedded is not mistaken for a deletion. Every non-conflicting change is
+committed with one atomic sidecar replacement. `pta-view` performs the same
+PDF-to-sidecar reconciliation before opening the panes. The import command
+itself never modifies the PDF. PDF files flattened through printing no longer
+contain editable annotation dictionaries and therefore cannot be reconciled.
+
+Saving markup in another PDF program changes the PDF byte hash and can make
+older sidecar `pdf_anchor` blocks stale even when the extracted text and layout
+did not change. During reconciliation, existing anchors are refreshed for the
+current PDF only when their complete canonical-source hash, range, quotation,
+and quotation hash are still exact. The sidecar front matter records the exact
+`pdf_sync_document_sha256` revision that was completely scanned and a
+`pdf_sync_sidecar_sha256` baseline excluding those self-referential fields. A
+Markdown-only edit is therefore preserved when the PDF is unchanged. Each
+confirmed record also stores separate PDF-state and sidecar-state fingerprints,
+so independent edits merge automatically: for example, a Markdown note edit is
+kept while a different highlight added in Preview is imported. Reconciliation
+stops without modifying either file only when the same annotation changed
+differently on both sides, or whenever the PDF deleted a confirmed annotation.
+Existing sidecars without record-level fingerprints are
+migrated conservatively from their retained PDF provenance. If a supported
+markup cannot be mapped confidently, the new revision is not marked
+synchronized and no missing sidecar records are deleted. If text evidence
+differs, the record remains untouched and must use the normal reviewed rematch
+workflow. Opening the pair with `pta-view` immediately shows unresolved
+PDF/Markdown conflicts instead of resolving them blindly at the command line.
+If the review is canceled, press `R` to reopen it later.
+
+The importer uses the normal exact-hash PDF extraction cache. Use
+`--no-pdf-cache` or `--rebuild-pdf-cache` for the same diagnostics available to
+`pta-view`.
 
 ### PDF extraction cache
 
@@ -87,8 +154,8 @@ python -c "from pure_text_annotator.pdfs import pdf_cache_directory; print(pdf_c
 `PTA_PDF_CACHE_DIR` may be set to choose another cache directory. The cache is
 also used automatically when `pta-embed` verifies PDF geometry.
 
-Use `pta-embed` to write the sidecar notes as standard yellow `/Highlight`
-annotations in a separate PDF copy:
+Use `pta-embed` to reconcile the Markdown records into the source PDF's
+standard annotation layer:
 
 ```bash
 pta-embed path/to/paper.pdf
@@ -97,27 +164,30 @@ pta-embed path/to/paper.pdf \
   --output path/to/review-copy.pdf
 ```
 
-The default input is `paper.pdf.annotations.md` and the default output is
-`paper.annotated.pdf`. Each page fragment becomes one PDF highlight carrying
-the note text, stable annotation ID, author, subject, and creation timestamp.
-Consequently, a single note that crosses two pages produces two highlights
-with the same ID and note text.
+The default sidecar is `paper.pdf.annotations.md`, and the default target is
+`paper.pdf` itself. Each page fragment becomes one standard text-markup
+annotation carrying the note text and stable sidecar ID. PTA-created records
+use yellow `/Highlight`; imported records retain their supported subtype,
+color, author, and subject. A cross-page note produces one PDF annotation per
+page with the same ID and note text. `--output` remains available for an
+explicit disposable export; `--force` applies only to replacing that explicit
+output.
 
-Every successful PDF annotation save triggers an immediate refresh of the
-conventional `paper.annotated.pdf` copy. This includes adding a note, pressing
-Ctrl+S after editing annotations, applying a confirmed rematch, and choosing
-Save while quitting with annotation changes. The refresh may atomically replace
-only that generated copy; it never replaces the source PDF or sidecar. An
-ordinary quit, or choosing Discard, does not perform embedding.
+Every successful PDF annotation save triggers immediate source-PDF
+synchronization. This includes adding or deleting a note, pressing Ctrl+S after
+editing annotations, applying a confirmed rematch, and choosing Save while
+quitting with annotation changes. An ordinary quit, or choosing Discard, does
+not rewrite the PDF.
 
-After a successful export, a private receipt records exact SHA-256 fingerprints
-of the source, sidecar, and generated copy. A later annotation save reports
-`Annotated PDF already current` without rebuilding only when all three files
-still match. Changing or replacing any one of them invalidates the receipt and
-the next annotation save triggers a fully validated atomic refresh. Receipt
-corruption or an unwritable state directory merely disables the shortcut; it
-never bypasses validation or blocks export. Set `PTA_EMBED_STATE_DIR` to choose
-another receipt directory.
+The source is never edited in place while validation is pending. PTA builds a
+temporary candidate, reopens it, verifies unchanged page content and geometry,
+and then atomically replaces the source. It immediately reconciles the written
+PDF back into the sidecar so byte hashes, identities, and geometry anchors all
+describe the new revision. If post-write reconciliation fails, the original
+PDF bytes are restored. A private receipt records the exact synchronized PDF
+and sidecar hashes so an unchanged save can be skipped safely. Receipt
+corruption or an unwritable state directory merely disables that shortcut. Set
+`PTA_EMBED_STATE_DIR` to choose another receipt directory.
 
 Use this option to skip the automatic refresh for one session:
 
@@ -125,20 +195,17 @@ Use this option to skip the automatic refresh for one session:
 pta-view --no-embed-on-save path/to/paper.pdf
 ```
 
-Export is deliberately fail-closed. Every sidecar record must be a valid note
+Synchronization is deliberately fail-closed. Every sidecar record must be a valid note
 with a current text anchor and `pdf_anchor`; the quotation, hashes, page data,
-range, and recomputed geometry must all match. No partial export is produced.
-The generated copy is reopened before replacement and checked for unchanged
+range, and recomputed geometry must all match. No partial update is produced.
+The candidate PDF is reopened before replacement and checked for unchanged
 page content streams, page boxes, rotation, resource names, annotation counts,
-note data, and highlight geometry. This avoids a second full PDF text
-extraction while still detecting unintended page-content changes.
-The standalone `pta-embed` command refuses encrypted or signed PDFs, an
-existing output unless `--force` is supplied, and any request to overwrite the
-source PDF. `--force` may replace only the separate output. Existing
-non-conflicting PDF annotations are preserved, and both the source PDF and
-Markdown sidecar remain unchanged. If a PDF has been replaced or a range
-becomes stale, run the confirmed rematch workflow before exporting; applying a
-PDF rematch regenerates that record's geometry automatically.
+note data, subtype, color, and geometry. Unsupported annotations such as links,
+drawings, and stamps are preserved. The standalone command refuses encrypted
+or signed PDFs. It also refuses to overwrite PDF-side edits made after the last
+complete reconciliation: run `pta-import`, inspect the Markdown changes, and
+then embed. If a range becomes stale, use the confirmed rematch workflow;
+applying a PDF rematch regenerates that record's geometry automatically.
 
 ## Resume cursor position
 
@@ -185,7 +252,7 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | `n` / `N` | Repeat the pane's search forward / backward |
 | Ctrl+N / Ctrl+P | Jump to the next / previous annotation |
 | `m` | Open the annotation action menu |
-| `R` | Scan stale annotations and open rematch review |
+| `R` | Review PDF annotation conflicts, then scan stale text ranges |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
 | `.` | Manually align and center both panes' cursor lines |
 | `zi` in annotations | Toggle metadata folding on/off |
@@ -230,15 +297,15 @@ default. The menu provides these actions:
   the source unchanged. Save or discard unrelated edits before deleting.
 - **Rematch annotations** opens the same review-first workflow as `R`.
 - **Show keybindings** opens a scrollable in-application reference.
-- **Embed annotations into PDF copy** manually refreshes the default
-  `.annotated.pdf` copy from all saved annotations. It is available only for PDF
-  sources, never overwrites the original PDF, and remains available when
-  `--no-embed-on-save` disables automatic refreshes.
+- **Synchronize annotations into source PDF** manually performs the same
+  verified, atomic Markdown-to-PDF reconciliation. It is available only for PDF
+  sources and remains available when `--no-embed-on-save` disables automatic
+  synchronization.
 
-In Normal mode, Ctrl+N and Ctrl+P move through annotations with wraparound. In
-the source pane, navigation follows source-range order; in the annotation pane,
-it follows sidecar order. Cross-pane movement continues to respect the current
-Normal, Sync, or Off alignment mode.
+In Normal mode, Ctrl+N and Ctrl+P move through annotations and stop at the last
+or first annotation instead of wrapping. In the source pane, navigation follows
+source-range order; in the annotation pane, it follows sidecar order. Cross-pane
+movement continues to respect the current Normal, Sync, or Off alignment mode.
 
 ## Edit text
 
@@ -291,6 +358,26 @@ or Malformed, then searches exact text, conservatively normalized text, saved
 prefix/suffix context, deterministic fuzzy candidates, and neighboring
 annotation order. No network or AI service is used.
 
+For a PDF source, record-level conflicts between the PDF annotation layer and
+the Markdown sidecar open automatically after both panes appear. If that panel
+was canceled, `R` checks again before ordinary text rematching. The compact
+conflict panel leaves both panes visible and previews the affected quotation
+and note. Every conflict requires an explicit decision; none is preselected:
+
+- If an annotation was deleted from the PDF but its Markdown record changed,
+  choose **Restore PDF** to write the Markdown annotation back, or **Delete MD**
+  to accept the PDF deletion and remove the sidecar record.
+- If the same annotation changed on both sides, choose **Use Markdown** to write
+  that version into the PDF, or **Use PDF** to replace the sidecar record.
+
+Use `J`/`K` to navigate, `M` to keep Markdown, `P` to keep the PDF, and Ctrl+S
+to continue after every item has a decision. A second compact panel shows each
+chosen effect before **Apply**. Applying rechecks both fingerprints, creates a
+timestamped `before-pdf-conflict` sidecar backup, reconciles the chosen records,
+and rolls both files back if PDF synchronization fails. Cancel and Review are
+read-only. After resolving PDF conflicts, press `R` again to perform ordinary
+text-range rematching if needed.
+
 The review is a compact panel at the bottom, leaving both text panes visible.
 For each proposal, the source pane scrolls to the proposed passage and marks it
 in green, while the annotation pane shows the stored quotation and note. The
@@ -321,7 +408,9 @@ record's `pdf_anchor` from the current PDF, including its document hash, page
 fragments, text ranges, boxes, rotation, and highlight quads. The written
 geometry is validated before the transaction completes. If PDF geometry is not
 available, an old anchor is removed so later export fails safely instead of
-using stale coordinates. The source file is never changed by rematching.
+using stale coordinates. Ordinary text-range rematching never changes the
+source file; the separately confirmed **Restore PDF** or **Use Markdown** PDF
+conflict decisions intentionally update the PDF annotation layer.
 
 Estimates are transparent heuristics rather than guarantees. Short, duplicated,
 or substantially changed quotations are deliberately penalized; leaving a note
@@ -405,12 +494,15 @@ dimmed so the current note remains easy to identify.
 - One file per application launch
 - `.txt`, `.md`, `.markdown`, and text-layer `.pdf` files
 - UTF-8 input, including files with a UTF-8 byte-order mark
-- PDF source viewing, geometry-aware annotation, and safe highlight export;
+- PDF source viewing, geometry-aware annotation, and verified in-place markup
+  synchronization;
   no OCR or rendered-page pane
+- Bidirectional reconciliation of standard PDF text markup with provenance,
+  edit/delete propagation, and geometry confidence reporting
 - Exact-hash PDF extraction caching for faster repeat opens
 - Exact-source cursor restoration across viewer sessions
 - Independent Vim-style jump histories for the source and annotation panes
-- Automatic refresh of the default annotated PDF copy after annotation saves
+- Automatic source-PDF annotation synchronization after annotation saves
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
@@ -420,7 +512,7 @@ dimmed so the current note remains easy to identify.
   validation, and rollback
 - Structured deletion of the current annotation with confirmation
 - Literal search with forward/backward repetition in both panes
-- No structured annotation-type filtering or semantic/AI matching yet
+- No in-view sidecar filtering by annotation type or semantic/AI matching yet
 
 ## Test
 
