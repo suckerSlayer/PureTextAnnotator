@@ -8,12 +8,15 @@ from pure_text_annotator.annotations import (
     AnnotationDraft,
     AnnotationRange,
     AnnotationStore,
+    AnnotationType,
     create_record,
 )
 from pure_text_annotator.app import (
+    AnnotationFilterModal,
     AnnotationMenuModal,
     AnnotationTextArea,
     DeleteAnnotationModal,
+    EditAnnotationModal,
     EditWarningModal,
     KeybindingsModal,
     NoteModal,
@@ -1307,6 +1310,217 @@ def test_annotation_menu_add_edit_and_sync_actions(tmp_path: Path) -> None:
             assert annotator.has_focus
             assert annotator.edit_mode is True
             assert not isinstance(app.screen, AnnotationMenuModal)
+
+    asyncio.run(scenario())
+
+
+def test_menu_creates_highlight_and_cursor_bookmark(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("zero one two", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("v", "l", "l", "m", "h")
+            await pilot.pause()
+
+            assert len(app.annotation_links) == 1
+            assert app.annotation_links[0].annotation_type is AnnotationType.HIGHLIGHT
+            assert "type: highlight" in app.annotation_store.path.read_text(
+                encoding="utf-8"
+            )
+
+            viewer.move_cursor((0, 5))
+            viewer.focus()
+            await pilot.press("m", "b")
+            await pilot.pause()
+
+            assert len(app.annotation_links) == 2
+            bookmark = app.annotation_links[1]
+            assert bookmark.annotation_type is AnnotationType.BOOKMARK
+            assert bookmark.bookmark_position == 5
+            saved = app.annotation_store.path.read_text(encoding="utf-8")
+            assert "type: bookmark" in saved
+            assert "position: 5" in saved
+
+    asyncio.run(scenario())
+
+
+def test_menu_structurally_edits_current_annotation_type_and_body(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("zero one", encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(0, 4, "zero"),
+                "Original note",
+                annotation_id="stable-note",
+                source_text="zero one",
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.pause()
+            await pilot.press("m", "x")
+            await pilot.pause()
+            assert isinstance(app.screen, EditAnnotationModal)
+            app.screen._select_type(AnnotationType.HIGHLIGHT)
+            body = app.screen.query_one("#edit-annotation-body", TextArea)
+            body.load_text("Optional highlight detail")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert len(app.annotation_links) == 1
+            edited = app.annotation_links[0]
+            assert edited.annotation_id == "stable-note"
+            assert edited.annotation_type is AnnotationType.HIGHLIGHT
+            saved = store.path.read_text(encoding="utf-8")
+            assert "type: highlight" in saved
+            assert "Optional highlight detail" in saved
+            assert 'id: "stable-note"' in saved
+
+    asyncio.run(scenario())
+
+
+def test_annotation_type_filter_projects_sidecar_and_limits_navigation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_text = "zero one two"
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append_many(
+            (
+                create_record(
+                    AnnotationDraft(0, 4, "zero"),
+                    "A note",
+                    annotation_id="note-1",
+                    source_text=source_text,
+                ),
+                create_record(
+                    AnnotationDraft(5, 8, "one"),
+                    "",
+                    annotation_type=AnnotationType.HIGHLIGHT,
+                    annotation_id="highlight-1",
+                    source_text=source_text,
+                ),
+                create_record(
+                    AnnotationDraft(9, 10, "t"),
+                    "",
+                    annotation_type=AnnotationType.BOOKMARK,
+                    bookmark_position=9,
+                    annotation_id="bookmark-1",
+                    source_text=source_text,
+                ),
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            canonical = annotator.canonical_text
+            annotator.focus()
+            await pilot.press("m", "f")
+            await pilot.pause()
+            assert isinstance(app.screen, AnnotationFilterModal)
+            await pilot.press("h")
+            await pilot.pause()
+
+            assert app.annotation_type_filter is AnnotationType.HIGHLIGHT
+            assert annotator.annotation_type_filter is AnnotationType.HIGHLIGHT
+            assert annotator.canonical_text == canonical
+            assert 'id="highlight-1"' in annotator.text
+            assert 'id="note-1"' not in annotator.text
+            assert 'id="bookmark-1"' not in annotator.text
+            assert [
+                link.annotation_id for link in app._valid_annotation_links()
+            ] == ["highlight-1"]
+
+            viewer = app.query_one(VimTextArea)
+            viewer.focus()
+            viewer.move_cursor((0, 0))
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 5)
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 5)
+
+            await pilot.press("m", "f", "a")
+            await pilot.pause()
+            assert app.annotation_type_filter is None
+            assert annotator.canonical_text == canonical
+            assert 'id="note-1"' in annotator.text
+            assert 'id="bookmark-1"' in annotator.text
+
+    asyncio.run(scenario())
+
+
+def test_same_range_and_overlapping_typed_annotations_remain_independent(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.txt"
+        source_text = "abcdef"
+        source_path.write_text(source_text, encoding="utf-8")
+        store = AnnotationStore(source_path)
+        store.append_many(
+            (
+                create_record(
+                    AnnotationDraft(0, 3, "abc"),
+                    "First",
+                    annotation_id="same-note",
+                    source_text=source_text,
+                ),
+                create_record(
+                    AnnotationDraft(0, 3, "abc"),
+                    "",
+                    annotation_type=AnnotationType.HIGHLIGHT,
+                    annotation_id="same-highlight",
+                    source_text=source_text,
+                ),
+                create_record(
+                    AnnotationDraft(2, 5, "cde"),
+                    "Overlap",
+                    annotation_id="overlap-note",
+                    source_text=source_text,
+                ),
+            )
+        )
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+            await pilot.pause()
+            assert annotator.active_link is not None
+            assert annotator.active_link.annotation_id == "same-note"
+
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 0)
+            assert annotator.active_link is not None
+            assert annotator.active_link.annotation_id == "same-highlight"
+
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert viewer.cursor_location == (0, 2)
+            assert annotator.active_link is not None
+            assert annotator.active_link.annotation_id == "overlap-note"
 
     asyncio.run(scenario())
 

@@ -11,7 +11,12 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .annotations import AnnotationRange, PdfAnchor, render_pdf_anchor
+from .annotations import (
+    AnnotationRange,
+    AnnotationType,
+    PdfAnchor,
+    render_pdf_anchor,
+)
 
 
 if TYPE_CHECKING:
@@ -35,6 +40,8 @@ class ParsedAnnotation:
 
     ordinal: int
     annotation_id: str
+    annotation_type: AnnotationType
+    bookmark_position: Optional[int]
     start: Optional[int]
     end: Optional[int]
     quote: Optional[str]
@@ -224,6 +231,14 @@ def _parse_block(
     elif metadata_id is not None and metadata_id != annotation_id:
         errors.append("marker ID and metadata ID differ")
 
+    type_match = re.search(r"(?m)^type:[ \t]*(\S+)[ \t]*$", metadata)
+    raw_type = type_match.group(1).strip('"\'') if type_match is not None else "note"
+    try:
+        annotation_type = AnnotationType(raw_type)
+    except ValueError:
+        annotation_type = AnnotationType.NOTE
+        errors.append(f"unsupported annotation type: {raw_type}")
+
     range_match = re.search(r"(?m)^range:[ \t]*(?:\n|$)", metadata)
     start: Optional[int] = None
     end: Optional[int] = None
@@ -237,6 +252,18 @@ def _parse_block(
         end = _integer_field(range_body, "end")
         if start is None or end is None or start >= end:
             errors.append("invalid source range")
+
+    bookmark_position = _integer_field(metadata, "position")
+    if annotation_type is AnnotationType.BOOKMARK:
+        if (
+            bookmark_position is None
+            or start is None
+            or end is None
+            or not start <= bookmark_position <= end
+        ):
+            errors.append("invalid bookmark position")
+    elif bookmark_position is not None:
+        errors.append("non-bookmark record contains a bookmark position")
 
     sections = _section_bounds(block)
     quote: Optional[str] = None
@@ -262,6 +289,8 @@ def _parse_block(
     return ParsedAnnotation(
         ordinal=ordinal,
         annotation_id=annotation_id,
+        annotation_type=annotation_type,
+        bookmark_position=bookmark_position,
         start=start,
         end=end,
         quote=quote,
@@ -973,6 +1002,31 @@ def _replace_range(metadata: str, source_range: AnnotationRange) -> str:
     return metadata[: range_match.end()] + body + metadata[body_end:]
 
 
+def _replace_bookmark_position(
+    metadata: str,
+    record: ParsedAnnotation,
+    source_range: AnnotationRange,
+) -> str:
+    """Move a bookmark position by the same relative anchor displacement."""
+
+    if (
+        record.bookmark_position is None
+        or record.start is None
+        or record.end is None
+    ):
+        raise ValueError("bookmark position disappeared during rematch")
+    relative = record.bookmark_position - record.start
+    new_position = min(source_range.end, source_range.start + max(0, relative))
+    updated, count = re.subn(
+        r"(?m)^(position:[ \t]*)\d+([ \t]*)$",
+        rf"\g<1>{new_position}\g<2>",
+        metadata,
+    )
+    if count != 1:
+        raise ValueError("bookmark position metadata is ambiguous")
+    return updated
+
+
 def _top_level_block(metadata: str, name: str) -> Optional[str]:
     match = re.search(
         rf"(?m)^{re.escape(name)}:[ \t]*(?:\n|$)", metadata
@@ -1005,6 +1059,10 @@ def _metadata_with_anchors_and_history(
     pdf_anchor: Optional[PdfAnchor],
 ) -> str:
     metadata = _replace_range(metadata, candidate.source_range)
+    if record.annotation_type is AnnotationType.BOOKMARK:
+        metadata = _replace_bookmark_position(
+            metadata, record, candidate.source_range
+        )
     metadata = _without_top_level_block(metadata, "anchor")
     metadata = _without_top_level_block(metadata, "pdf_anchor")
 
@@ -1163,6 +1221,8 @@ def validate_applied_rematches(
         new = new_by_id[annotation_id]
         if old.note != new.note:
             raise ValueError(f"note changed for {annotation_id}")
+        if old.annotation_type is not new.annotation_type:
+            raise ValueError(f"annotation type changed for {annotation_id}")
         if old.created_at != new.created_at:
             raise ValueError(f"creation time changed for {annotation_id}")
         if new.errors:
@@ -1179,6 +1239,17 @@ def validate_applied_rematches(
         expected = source_text[source_range.start : source_range.end]
         if record.start != source_range.start or record.end != source_range.end:
             raise ValueError(f"range verification failed for {choice.annotation_id}")
+        if record.annotation_type is AnnotationType.BOOKMARK:
+            old = old_by_id[choice.annotation_id]
+            assert old.start is not None and old.bookmark_position is not None
+            expected_position = min(
+                source_range.end,
+                source_range.start + old.bookmark_position - old.start,
+            )
+            if record.bookmark_position != expected_position:
+                raise ValueError(
+                    f"bookmark position verification failed for {choice.annotation_id}"
+                )
         if record.quote != expected:
             raise ValueError(f"quotation verification failed for {choice.annotation_id}")
         block = after[record.block_start : record.block_end]

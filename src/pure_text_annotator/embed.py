@@ -26,7 +26,7 @@ from pypdf.generic import (
     TextStringObject,
 )
 
-from .annotations import PdfAnchor, PdfAnchorFragment
+from .annotations import AnnotationType, PdfAnchor, PdfAnchorFragment
 from .embed_state import file_sha256, save_embed_receipt
 from .files import LoadedTextFile, TextFileError, load_source_file
 from .pdfs import rebind_loaded_pdf
@@ -55,6 +55,7 @@ class PdfEmbedRecord:
     """One fully validated sidecar record ready for PDF export."""
 
     annotation_id: str
+    annotation_type: AnnotationType
     start: int
     end: int
     quote: str
@@ -445,7 +446,12 @@ def parse_pdf_embed_records(
                 raise PdfEmbedError("missing source range")
             if record.quote is None:
                 raise PdfEmbedError("missing quoted original text")
-            if record.note is None or not record.note.strip():
+            if record.note is None:
+                raise PdfEmbedError("note section is missing")
+            if (
+                record.annotation_type is AnnotationType.NOTE
+                and not record.note.strip()
+            ):
                 raise PdfEmbedError("note content is empty")
             if not 0 <= record.start < record.end <= len(source_text):
                 raise PdfEmbedError("source range is outside the extracted PDF text")
@@ -459,8 +465,8 @@ def parse_pdf_embed_records(
             metadata_id = _string(metadata.get("id"), "id")
             if metadata_id != record.annotation_id:
                 raise PdfEmbedError("marker ID and metadata ID differ")
-            if metadata.get("type") != "note":
-                raise PdfEmbedError("only type: note records can be embedded")
+            if metadata.get("type", "note") != record.annotation_type.value:
+                raise PdfEmbedError("parsed and YAML annotation types differ")
             range_data = _mapping(metadata.get("range"), "range")
             if (
                 _integer(range_data.get("start"), "range.start") != record.start
@@ -532,6 +538,7 @@ def parse_pdf_embed_records(
             output.append(
                 PdfEmbedRecord(
                     annotation_id=record.annotation_id,
+                    annotation_type=record.annotation_type,
                     start=record.start,
                     end=record.end,
                     quote=record.quote,

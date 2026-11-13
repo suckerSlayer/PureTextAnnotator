@@ -24,6 +24,7 @@ from .annotations import (
     AnnotationFileError,
     AnnotationRecord,
     AnnotationStore,
+    AnnotationType,
     PdfAnchor,
     PdfImportMetadata,
     PdfQuad,
@@ -767,7 +768,10 @@ def _pdf_group_matches_sidecar(
     end = max(part.match.end for part in parts)
     first = parts[0]
     note = first.contents if not first.generated_note else (
-        f"_Imported PDF {first.subtype.lower()} without a comment._"
+        existing.note
+        if existing.annotation_type is not AnnotationType.NOTE
+        and existing.note is not None
+        else f"_Imported PDF {first.subtype.lower()} without a comment._"
     )
     return (
         start == existing.start
@@ -849,7 +853,10 @@ def _record_for_group(
             or existing.note is None
             or not 0 <= existing.start < existing.end <= len(source.text)
             or source.text[existing.start : existing.end] != existing.quote
-            or not existing.note.strip()
+            or (
+                existing.annotation_type is AnnotationType.NOTE
+                and not existing.note.strip()
+            )
         ):
             raise ValueError(
                 "sidecar changes cannot be preserved because the record is stale"
@@ -858,11 +865,17 @@ def _record_for_group(
         end = existing.end
         quote = existing.quote
         note = existing.note
+        annotation_type = existing.annotation_type
     else:
         start = pdf_start
         end = pdf_end
         quote = pdf_quote
         note = pdf_note
+        annotation_type = (
+            AnnotationType.HIGHLIGHT
+            if first.generated_note
+            else AnnotationType.NOTE
+        )
     pdf_anchor = document.anchor_for_range(start, end)
     if pdf_anchor is None:
         raise ValueError("matched source range has no canonical PDF anchor")
@@ -913,6 +926,7 @@ def _record_for_group(
     record = create_record(
         AnnotationDraft(start, end, quote),
         note,
+        annotation_type=annotation_type,
         annotation_id=annotation_id,
         created_at=created_at,
         source_text=source.text,

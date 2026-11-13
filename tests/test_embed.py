@@ -1,7 +1,7 @@
 import hashlib
 import re
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import pytest
 from pypdf import PdfReader, PdfWriter
@@ -19,12 +19,14 @@ from pypdf.generic import (
 from pure_text_annotator.annotations import (
     AnnotationDraft,
     AnnotationStore,
+    AnnotationType,
     create_record,
 )
 from pure_text_annotator.embed import PdfEmbedError, embed_pdf_annotations
 from pure_text_annotator.embed_cli import main
 from pure_text_annotator.files import LoadedTextFile, load_source_file
 from pure_text_annotator.pdf_import import import_pdf_text_markups
+from pure_text_annotator.rematch import parse_annotation_records
 
 from pdf_fixtures import write_text_pdf
 
@@ -36,6 +38,8 @@ def _append_note(
     annotation_id: str,
     note: str,
     occurrence: int = 0,
+    annotation_type: AnnotationType = AnnotationType.NOTE,
+    bookmark_position: Optional[int] = None,
 ) -> Path:
     assert source.pdf_document is not None
     starts = tuple(match.start() for match in re.finditer(re.escape(quote), source.text))
@@ -48,6 +52,8 @@ def _append_note(
         create_record(
             AnnotationDraft(start, end, quote),
             note,
+            annotation_type=annotation_type,
+            bookmark_position=bookmark_position,
             annotation_id=annotation_id,
             created_at="2026-11-05T09:30:00+08:00",
             source_text=source.text,
@@ -126,6 +132,54 @@ def test_embed_single_page_note_as_standard_highlight(tmp_path: Path) -> None:
     assert int(annotation["/F"]) & 4
     assert len(annotation["/Rect"]) == 4
     assert len(annotation["/QuadPoints"]) == 8
+
+
+def test_embed_and_reconcile_typed_highlight_and_bookmark(tmp_path: Path) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "typed.pdf", ("Alpha highlight and bookmark omega",)
+    )
+    source = load_source_file(source_path)
+    _append_note(
+        source,
+        "highlight",
+        annotation_id="typed-highlight",
+        note="",
+        annotation_type=AnnotationType.HIGHLIGHT,
+    )
+    bookmark_start = source.text.index("bookmark")
+    _append_note(
+        source,
+        "b",
+        annotation_id="typed-bookmark",
+        note="",
+        annotation_type=AnnotationType.BOOKMARK,
+        bookmark_position=bookmark_start,
+    )
+
+    result = embed_pdf_annotations(source_path)
+
+    annotations = _annotations(PdfReader(result.output_path), 0)
+    assert {str(item["/NM"]) for item in annotations} == {
+        "typed-highlight",
+        "typed-bookmark",
+    }
+    assert all(str(item["/Contents"]) == "" for item in annotations)
+    records = parse_annotation_records(
+        AnnotationStore(source_path).read_text()
+    )
+    assert [record.annotation_type for record in records] == [
+        AnnotationType.HIGHLIGHT,
+        AnnotationType.BOOKMARK,
+    ]
+
+    reconciled = import_pdf_text_markups(source_path)
+    assert reconciled.imported == ()
+    assert [
+        record.annotation_type
+        for record in parse_annotation_records(
+            AnnotationStore(source_path).read_text()
+        )
+    ] == [AnnotationType.HIGHLIGHT, AnnotationType.BOOKMARK]
 
 
 def test_embed_multi_page_note_creates_one_highlight_per_page(

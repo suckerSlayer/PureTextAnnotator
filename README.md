@@ -3,7 +3,8 @@
 Pure Text Annotator is a keyboard-first terminal interface for UTF-8 text,
 Markdown, and text-layer PDF files. It provides Vim-style navigation,
 selection, guarded text editing, and notes in a human-readable Markdown sidecar
-shown beside the source.
+shown beside the source. Annotations have three first-class types: Markdown
+notes, range highlights, and cursor-position bookmarks.
 
 ## Set up
 
@@ -83,8 +84,8 @@ author, subject, dates, color, original rectangle and quad points, source-PDF
 hash, and a stable import fingerprint. `pdf_sync` metadata records the durable
 identity confirmed in the PDF. A markup annotation with no `/Contents` comment
 receives a visibly generated note such as
-`Imported PDF highlight without a comment` so the note-based sidecar remains
-valid.
+`Imported PDF highlight without a comment` for provenance and is classified as
+`type: highlight` rather than being forced into the note type.
 
 Reconciliation is bidirectional and identity-aware. New PDF markup is appended,
 and changed range or comment data replaces the corresponding sidecar block.
@@ -166,10 +167,11 @@ pta-embed path/to/paper.pdf \
 
 The default sidecar is `paper.pdf.annotations.md`, and the default target is
 `paper.pdf` itself. Each page fragment becomes one standard text-markup
-annotation carrying the note text and stable sidecar ID. PTA-created records
-use yellow `/Highlight`; imported records retain their supported subtype,
-color, author, and subject. A cross-page note produces one PDF annotation per
-page with the same ID and note text. `--output` remains available for an
+annotation carrying the optional body text and stable sidecar ID. PTA-created
+notes, highlights, and bookmarks use yellow `/Highlight`; imported records
+retain their supported subtype, color, author, and subject. A cross-page range
+produces one PDF annotation per page with the same ID and body text. `--output`
+remains available for an
 explicit disposable export; `--force` applies only to replacing that explicit
 output.
 
@@ -195,8 +197,9 @@ Use this option to skip the automatic refresh for one session:
 pta-view --no-embed-on-save path/to/paper.pdf
 ```
 
-Synchronization is deliberately fail-closed. Every sidecar record must be a valid note
-with a current text anchor and `pdf_anchor`; the quotation, hashes, page data,
+Synchronization is deliberately fail-closed. Every sidecar record must have a
+supported type and a current text anchor and `pdf_anchor`; notes additionally
+require non-empty body text. The quotation, hashes, page data,
 range, and recomputed geometry must all match. No partial update is produced.
 The candidate PDF is reopened before replacement and checked for unchanged
 page content streams, page boxes, rotation, resource names, annotation counts,
@@ -251,7 +254,7 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | `/` | Search within the focused pane |
 | `n` / `N` | Repeat the pane's search forward / backward |
 | Ctrl+N / Ctrl+P | Jump to the next / previous annotation |
-| `m` | Open the annotation action menu |
+| `m` | Open the annotation action menu for types, filtering, deletion, and tools |
 | `R` | Review PDF annotation conflicts, then scan stale text ranges |
 | `S` | Cycle alignment mode: Normal → Sync → Off |
 | `.` | Manually align and center both panes' cursor lines |
@@ -283,11 +286,20 @@ file.
 ## Annotation action menu
 
 Press `m` in Normal mode from either pane to open a compact menu while keeping
-the source and annotation panes visible. **Add annotation** is focused by
+the source and annotation panes visible. **Add note** is focused by
 default. The menu provides these actions:
 
-- **Add annotation** opens the note prompt for the current source selection,
+- **Add note** opens the note prompt for the current source selection,
   with the same validation as the `a` key.
+- **Add highlight** saves the current source selection without requiring a note
+  body.
+- **Add bookmark** records the source cursor position and a minimal text anchor;
+  it does not require a visual selection or note body.
+- **Filter annotations** chooses All, Notes, Highlights, or Bookmarks. Filtering
+  changes only the right-pane projection; it never rewrites the sidecar. Search
+  and Ctrl+N/Ctrl+P operate on the visible type.
+- **Edit current annotation** opens a structured form for changing that record's
+  type and optional Markdown body while retaining its stable ID and anchor.
 - **Enter Edit mode** acts on the pane from which the menu was opened. Source
   editing still requires the literal `Yes` warning confirmation; annotation
   editing starts immediately.
@@ -302,7 +314,7 @@ default. The menu provides these actions:
   sources and remains available when `--no-embed-on-save` disables automatic
   synchronization.
 
-In Normal mode, Ctrl+N and Ctrl+P move through annotations and stop at the last
+In Normal mode, Ctrl+N and Ctrl+P move through visible annotations and stop at the last
 or first annotation instead of wrapping. In the source pane, navigation follows
 source-range order; in the annotation pane, it follows sidecar order. Cross-pane
 movement continues to respect the current Normal, Sync, or Off alignment mode.
@@ -461,7 +473,29 @@ Normal mode restores the selected folds. Both transitions preserve the cursor's
 visual row in the viewport, so expanding or collapsing hidden metadata does not
 make the editing position jump on screen.
 
-## Add an annotation
+## Annotation types and filtering
+
+Pure Text Annotator stores `type: note`, `type: highlight`, or `type: bookmark`
+in every structured block. Notes and highlights use the exact selected
+half-open range. A newly created bookmark stores an explicit `position` plus a
+one-character range anchor, quotation, hashes, and bounded context so that the normal
+rematcher can relocate it after edits. At end-of-file, its saved position may
+equal the anchor's end.
+
+Press `m` to add any type. The direct `a` key remains the fast path for a note.
+The same menu opens the type filter. The status line shows `FILTER ALL`,
+`FILTER NOTE`, `FILTER HIGHLIGHT`, or `FILTER BOOKMARK`. Entering annotation
+Edit mode temporarily reveals the complete canonical sidecar; leaving Edit mode
+reapplies the filter. Same-range annotations retain independent stable IDs, and
+overlapping annotations remain separate records and navigation stops.
+
+For text and Markdown, all three types are sidecar-native. For a text-layer PDF,
+all three retain canonical text and geometry anchors and synchronize as standard
+PDF text markup; a bookmark is represented by its minimal character anchor.
+Markup imported from another PDF application without a comment becomes a
+highlight, while markup with a comment becomes a note.
+
+## Add a note
 
 1. Press `v` and move the cursor to select source text.
 2. Press `a` to open the note dialog.
@@ -469,9 +503,9 @@ make the editing position jump on screen.
 4. Press Ctrl+S or Ctrl+Enter to save, or Escape to cancel.
 
 The right pane mirrors the complete annotation file. For a source named
-`chapter.md`, notes are saved beside it as `chapter.md.annotations.md`; for
+`chapter.md`, annotations are saved beside it as `chapter.md.annotations.md`; for
 `paper.pdf`, the sidecar is `paper.pdf.annotations.md`. Each entry contains a
-stable identifier, creation time, the original quotation, the note, and a
+stable identifier, type, creation time, the original quotation, optional body, and a
 zero-based half-open source range measured in Unicode code points. PDF entries
 created by this version also include the page geometry described above.
 Recorded ranges are highlighted in yellow in the source pane when the file opens
@@ -506,13 +540,14 @@ dimmed so the current note remains easy to identify.
 - Guarded source editing and direct annotation editing with dirty tracking
 - Line numbers in both panes and optional wrapping
 - Persistent Markdown sidecar annotations with atomic saving
-- Original quotation, source range, hashes, and bounded context recorded for
-  new notes
+- Note, highlight, and bookmark records with stable IDs; original quotation,
+  source range, hashes, and bounded context
 - Review-first deterministic rematching with confidence estimates, backup,
   validation, and rollback
 - Structured deletion of the current annotation with confirmation
 - Literal search with forward/backward repetition in both panes
-- No in-view sidecar filtering by annotation type or semantic/AI matching yet
+- Non-destructive in-view type filtering for All, Note, Highlight, and Bookmark
+- No semantic/AI matching; rematching remains local and deterministic
 
 ## Test
 

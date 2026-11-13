@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple
 
@@ -17,6 +19,20 @@ Location = Tuple[int, int]
 PdfRectangle = Tuple[float, float, float, float]
 PdfQuad = Tuple[float, float, float, float, float, float, float, float]
 ANNOTATION_MARKER = "<!-- pta:annotation "
+
+
+class AnnotationType(str, Enum):
+    """The three annotation kinds required by the project specification."""
+
+    NOTE = "note"
+    HIGHLIGHT = "highlight"
+    BOOKMARK = "bookmark"
+
+    @property
+    def label(self) -> str:
+        """Return a compact user-facing label."""
+
+        return self.value.capitalize()
 
 
 class AnnotationFileError(RuntimeError):
@@ -53,6 +69,9 @@ class AnnotationLink:
     sidecar_note_line: int
     sidecar_note_start_line: Optional[int]
     sidecar_note_end_line: Optional[int]
+    annotation_id: str = ""
+    annotation_type: AnnotationType = AnnotationType.NOTE
+    bookmark_position: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +146,8 @@ class AnnotationRecord:
     quote: str
     note: str
     created_at: str
+    annotation_type: AnnotationType = AnnotationType.NOTE
+    bookmark_position: Optional[int] = None
     source_sha256: Optional[str] = None
     quote_sha256: Optional[str] = None
     prefix: Optional[str] = None
@@ -274,6 +295,9 @@ def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
     sidecar_note_line: Optional[int] = None
     range_start: Optional[int] = None
     range_end: Optional[int] = None
+    annotation_id = ""
+    annotation_type: Optional[AnnotationType] = AnnotationType.NOTE
+    bookmark_position: Optional[int] = None
 
     lines = annotation_text.splitlines()
     for line_number, line in enumerate(lines):
@@ -290,6 +314,17 @@ def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
             sidecar_note_line = None
             range_start = None
             range_end = None
+            annotation_id = ""
+            annotation_type = AnnotationType.NOTE
+            bookmark_position = None
+            marker_id = line.partition("id=")[2].rpartition(" -->")[0]
+            if marker_id:
+                try:
+                    parsed_id = json.loads(marker_id)
+                    if isinstance(parsed_id, str):
+                        annotation_id = parsed_id
+                except json.JSONDecodeError:
+                    pass
             continue
 
         if not in_annotation:
@@ -300,6 +335,7 @@ def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
                 range_start is not None
                 and range_end is not None
                 and 0 <= range_start < range_end
+                and annotation_type is not None
                 and sidecar_start_line is not None
             ):
                 quote_start_line: Optional[int] = None
@@ -363,6 +399,17 @@ def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
                         ),
                         sidecar_note_start_line=note_start_line,
                         sidecar_note_end_line=note_end_line,
+                        annotation_id=annotation_id,
+                        annotation_type=annotation_type,
+                        bookmark_position=(
+                            bookmark_position
+                            if annotation_type is AnnotationType.BOOKMARK
+                            and bookmark_position is not None
+                            and range_start <= bookmark_position <= range_end
+                            else range_start
+                            if annotation_type is AnnotationType.BOOKMARK
+                            else None
+                        ),
                     )
                 )
             in_annotation = False
@@ -396,6 +443,29 @@ def parse_annotation_links(annotation_text: str) -> Tuple[AnnotationLink, ...]:
             continue
 
         if not in_metadata:
+            continue
+
+        if not line.startswith((" ", "\t")) and stripped.startswith("id:"):
+            raw_value = stripped.partition(":")[2].strip()
+            try:
+                parsed_id = json.loads(raw_value)
+                if isinstance(parsed_id, str):
+                    annotation_id = parsed_id
+            except json.JSONDecodeError:
+                pass
+            continue
+
+        if not line.startswith((" ", "\t")) and stripped.startswith("type:"):
+            raw_value = stripped.partition(":")[2].strip().strip('"\'')
+            try:
+                annotation_type = AnnotationType(raw_value)
+            except ValueError:
+                annotation_type = None
+            continue
+
+        if not line.startswith((" ", "\t")) and stripped.startswith("position:"):
+            value = stripped.partition(":")[2].strip()
+            bookmark_position = int(value) if value.isdecimal() else None
             continue
 
         if stripped == "range:":
@@ -467,6 +537,109 @@ def delete_annotation_block(
     return renumber_annotation_headings(updated)
 
 
+def annotation_note_text(
+    annotation_text: str, link: AnnotationLink
+) -> str:
+    """Return one parsed annotation's body without surrounding blank lines."""
+
+    if (
+        link.sidecar_note_start_line is None
+        or link.sidecar_note_end_line is None
+    ):
+        return ""
+    lines = annotation_text.splitlines()
+    if not (
+        0
+        <= link.sidecar_note_start_line
+        <= link.sidecar_note_end_line
+        < len(lines)
+    ):
+        raise ValueError("annotation note is outside the sidecar document")
+    return "\n".join(
+        lines[
+            link.sidecar_note_start_line : link.sidecar_note_end_line + 1
+        ]
+    )
+
+
+def update_annotation_block(
+    annotation_text: str,
+    link: AnnotationLink,
+    *,
+    annotation_type: AnnotationType,
+    note: str,
+) -> str:
+    """Replace one record's type and body while preserving its stable identity."""
+
+    annotation_type = AnnotationType(annotation_type)
+    note = note.rstrip()
+    if annotation_type is AnnotationType.NOTE and not note.strip():
+        raise ValueError("annotation note cannot be empty")
+
+    lines = annotation_text.splitlines(keepends=True)
+    if not (
+        0 <= link.sidecar_start_line <= link.sidecar_end_line < len(lines)
+    ):
+        raise ValueError("annotation block is outside the sidecar document")
+    block_start = sum(len(line) for line in lines[: link.sidecar_start_line])
+    block_end = sum(len(line) for line in lines[: link.sidecar_end_line + 1])
+    block = annotation_text[block_start:block_end]
+    if not block.startswith(ANNOTATION_MARKER):
+        raise ValueError("annotation block start marker no longer matches")
+
+    fence_open = re.search(r"(?m)^```yaml[ \t]*(?:\r?\n|$)", block)
+    if fence_open is None:
+        raise ValueError("annotation metadata block is missing")
+    fence_close_relative = re.search(
+        r"(?m)^```[ \t]*(?:\r?\n|$)", block[fence_open.end() :]
+    )
+    if fence_close_relative is None:
+        raise ValueError("annotation metadata terminator is missing")
+    metadata_start = fence_open.end()
+    metadata_end = metadata_start + fence_close_relative.start()
+    metadata = block[metadata_start:metadata_end]
+    metadata, type_count = re.subn(
+        r"(?m)^type:[ \t]*[^\r\n]+[ \t]*$",
+        f"type: {annotation_type.value}",
+        metadata,
+    )
+    if type_count != 1:
+        raise ValueError("annotation type metadata is ambiguous")
+    metadata = re.sub(
+        r"(?m)^position:[ \t]*\d+[ \t]*(?:\r?\n|$)",
+        "",
+        metadata,
+    )
+    if annotation_type is AnnotationType.BOOKMARK:
+        position = (
+            link.bookmark_position
+            if link.bookmark_position is not None
+            else link.source_range.start
+        )
+        type_line = re.search(r"(?m)^type:[^\r\n]*(?:\r?\n|$)", metadata)
+        assert type_line is not None
+        metadata = (
+            metadata[: type_line.end()]
+            + f"position: {position}\n"
+            + metadata[type_line.end() :]
+        )
+    block = block[:metadata_start] + metadata + block[metadata_end:]
+
+    note_heading = re.search(
+        r"(?m)^### Note[ \t]*(?:\r?\n|$)", block
+    )
+    close_marker = re.search(r"(?m)^<!-- /pta:annotation -->", block)
+    if note_heading is None or close_marker is None:
+        raise ValueError("annotation note section is missing")
+    updated_block = (
+        block[: note_heading.end()].rstrip("\r\n")
+        + "\n\n"
+        + (note + "\n\n" if note else "\n")
+        + block[close_marker.start() :]
+    )
+    return annotation_text[:block_start] + updated_block + annotation_text[block_end:]
+
+
 def renumber_annotation_headings(annotation_text: str) -> str:
     """Renumber structural ``## Annotation`` headings in document order."""
 
@@ -520,6 +693,8 @@ def create_record(
     draft: AnnotationDraft,
     note: str,
     *,
+    annotation_type: AnnotationType = AnnotationType.NOTE,
+    bookmark_position: Optional[int] = None,
     annotation_id: Optional[str] = None,
     created_at: Optional[str] = None,
     source_text: Optional[str] = None,
@@ -527,10 +702,18 @@ def create_record(
     pdf_import: Optional[PdfImportMetadata] = None,
     pdf_sync: Optional[PdfSyncMetadata] = None,
 ) -> AnnotationRecord:
-    """Turn a selected range and note into a persistent record."""
+    """Turn a source anchor into a persistent typed annotation record."""
 
-    if not note.strip():
+    annotation_type = AnnotationType(annotation_type)
+    if annotation_type is AnnotationType.NOTE and not note.strip():
         raise ValueError("annotation note cannot be empty")
+    if annotation_type is AnnotationType.BOOKMARK:
+        if bookmark_position is None:
+            bookmark_position = draft.start
+        if not draft.start <= bookmark_position <= draft.end:
+            raise ValueError("bookmark position is outside its source anchor")
+    elif bookmark_position is not None:
+        raise ValueError("only bookmarks can store a bookmark position")
     timestamp = created_at or datetime.now(timezone.utc).isoformat(
         timespec="seconds"
     ).replace("+00:00", "Z")
@@ -559,6 +742,8 @@ def create_record(
         quote=draft.quote,
         note=note.rstrip(),
         created_at=timestamp,
+        annotation_type=annotation_type,
+        bookmark_position=bookmark_position,
         pdf_anchor=pdf_anchor,
         pdf_import=pdf_import,
         pdf_sync=pdf_sync,
@@ -657,12 +842,19 @@ class AnnotationStore:
             if record.pdf_sync is not None
             else ""
         )
+        position = (
+            f"position: {record.bookmark_position}\n"
+            if record.annotation_type is AnnotationType.BOOKMARK
+            and record.bookmark_position is not None
+            else ""
+        )
         return (
             f"{self.MARKER}id={annotation_id} -->\n"
             f"## Annotation {ordinal}\n\n"
             "```yaml\n"
             f"id: {annotation_id}\n"
-            "type: note\n"
+            f"type: {record.annotation_type.value}\n"
+            f"{position}"
             "range:\n"
             f"  start: {record.start}\n"
             f"  end: {record.end}\n"

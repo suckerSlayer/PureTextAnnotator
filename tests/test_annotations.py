@@ -8,12 +8,15 @@ from pure_text_annotator.annotations import (
     AnnotationLink,
     AnnotationRange,
     AnnotationStore,
+    AnnotationType,
+    annotation_note_text,
     create_record,
     delete_annotation_block,
     draft_from_selection,
     location_to_offset,
     parse_annotation_links,
     parse_annotation_ranges,
+    update_annotation_block,
 )
 
 
@@ -199,6 +202,7 @@ def test_parse_annotation_ranges_reads_persisted_metadata(tmp_path: Path) -> Non
             sidecar_note_line=note_lines[0],
             sidecar_note_start_line=first_note_start,
             sidecar_note_end_line=first_note_end,
+            annotation_id="annotation-1",
         ),
         AnnotationLink(
             source_range=AnnotationRange(8, 13),
@@ -210,7 +214,106 @@ def test_parse_annotation_ranges_reads_persisted_metadata(tmp_path: Path) -> Non
             sidecar_note_line=note_lines[1],
             sidecar_note_start_line=second_note_start,
             sidecar_note_end_line=second_note_end,
+            annotation_id="annotation-2",
         ),
+    )
+
+
+def test_store_round_trips_highlight_and_bookmark_types(tmp_path: Path) -> None:
+    source = tmp_path / "chapter.txt"
+    source.write_text("alpha beta", encoding="utf-8")
+    store = AnnotationStore(source)
+    highlight = create_record(
+        AnnotationDraft(0, 5, "alpha"),
+        "",
+        annotation_type=AnnotationType.HIGHLIGHT,
+        annotation_id="highlight-1",
+        source_text="alpha beta",
+    )
+    bookmark = create_record(
+        AnnotationDraft(6, 7, "b"),
+        "",
+        annotation_type=AnnotationType.BOOKMARK,
+        bookmark_position=6,
+        annotation_id="bookmark-1",
+        source_text="alpha beta",
+    )
+
+    saved = store.append_many((highlight, bookmark))
+    links = parse_annotation_links(saved)
+
+    assert "type: highlight" in saved
+    assert "type: bookmark" in saved
+    assert "position: 6" in saved
+    assert [link.annotation_type for link in links] == [
+        AnnotationType.HIGHLIGHT,
+        AnnotationType.BOOKMARK,
+    ]
+    assert [link.annotation_id for link in links] == [
+        "highlight-1",
+        "bookmark-1",
+    ]
+    assert links[1].bookmark_position == 6
+
+
+def test_only_note_type_requires_nonempty_note() -> None:
+    draft = AnnotationDraft(0, 1, "a")
+
+    with pytest.raises(ValueError, match="note cannot be empty"):
+        create_record(draft, "", annotation_type=AnnotationType.NOTE)
+
+    assert (
+        create_record(draft, "", annotation_type=AnnotationType.HIGHLIGHT).note
+        == ""
+    )
+    with pytest.raises(ValueError, match="outside its source anchor"):
+        create_record(
+            draft,
+            "",
+            annotation_type=AnnotationType.BOOKMARK,
+            bookmark_position=2,
+        )
+
+
+def test_update_annotation_block_changes_type_and_body_without_identity(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chapter.txt"
+    source.write_text("alpha", encoding="utf-8")
+    store = AnnotationStore(source)
+    saved = store.append(
+        create_record(
+            AnnotationDraft(0, 5, "alpha"),
+            "Original body",
+            annotation_id="stable-id",
+            source_text="alpha",
+        )
+    )
+    link = parse_annotation_links(saved)[0]
+
+    highlighted = update_annotation_block(
+        saved,
+        link,
+        annotation_type=AnnotationType.HIGHLIGHT,
+        note="",
+    )
+    highlighted_link = parse_annotation_links(highlighted)[0]
+    assert highlighted_link.annotation_id == "stable-id"
+    assert highlighted_link.annotation_type is AnnotationType.HIGHLIGHT
+    assert annotation_note_text(highlighted, highlighted_link) == ""
+    assert 'id: "stable-id"' in highlighted
+
+    bookmarked = update_annotation_block(
+        highlighted,
+        highlighted_link,
+        annotation_type=AnnotationType.BOOKMARK,
+        note="Optional bookmark detail",
+    )
+    bookmark_link = parse_annotation_links(bookmarked)[0]
+    assert bookmark_link.annotation_type is AnnotationType.BOOKMARK
+    assert bookmark_link.bookmark_position == 0
+    assert annotation_note_text(bookmarked, bookmark_link) == (
+        "Optional bookmark detail"
     )
 
 

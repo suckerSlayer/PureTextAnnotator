@@ -7,6 +7,7 @@ from pure_text_annotator.annotations import (
     AnnotationFileError,
     AnnotationRange,
     AnnotationStore,
+    AnnotationType,
     create_record,
 )
 from pure_text_annotator.rematch import (
@@ -56,6 +57,78 @@ def test_new_records_capture_backward_compatible_anchors(tmp_path: Path) -> None
     assert record.original_start == source.index("selected words")
     assert record.quote_sha256 is not None
     assert record.source_sha256 is not None
+
+
+def test_typed_annotation_rematch_preserves_type_and_empty_body(
+    tmp_path: Path,
+) -> None:
+    original = "Before highlighted words after"
+    source_path = tmp_path / "source.md"
+    source_path.write_text(original, encoding="utf-8")
+    start = original.index("highlighted words")
+    store = AnnotationStore(source_path)
+    sidecar = store.append(
+        create_record(
+            AnnotationDraft(start, start + len("highlighted words"), "highlighted words"),
+            "",
+            annotation_type=AnnotationType.HIGHLIGHT,
+            annotation_id="highlight-1",
+            source_text=original,
+        )
+    )
+    changed = "Inserted. " + original
+    item = scan_rematches(changed, sidecar).items[0]
+    assert item.proposed is not None
+
+    updated = apply_rematches(
+        sidecar,
+        changed,
+        (RematchChoice("highlight-1", item.proposed),),
+        rematched_at="2026-11-13T10:00:00Z",
+    )
+    record = parse_annotation_records(updated)[0]
+
+    assert record.annotation_type is AnnotationType.HIGHLIGHT
+    assert record.note == ""
+    validate_applied_rematches(
+        sidecar,
+        updated,
+        changed,
+        (RematchChoice("highlight-1", item.proposed),),
+    )
+
+
+def test_bookmark_rematch_moves_saved_cursor_position(tmp_path: Path) -> None:
+    original = "Before bookmark after"
+    source_path = tmp_path / "source.md"
+    source_path.write_text(original, encoding="utf-8")
+    start = original.index("bookmark")
+    store = AnnotationStore(source_path)
+    sidecar = store.append(
+        create_record(
+            AnnotationDraft(start, start + 1, "b"),
+            "",
+            annotation_type=AnnotationType.BOOKMARK,
+            bookmark_position=start,
+            annotation_id="bookmark-1",
+            source_text=original,
+        )
+    )
+    changed = "Inserted. " + original
+    item = scan_rematches(changed, sidecar).items[0]
+    assert item.proposed is not None
+    choice = RematchChoice("bookmark-1", item.proposed)
+
+    updated = apply_rematches(
+        sidecar,
+        changed,
+        (choice,),
+        rematched_at="2026-11-13T10:00:00Z",
+    )
+    record = parse_annotation_records(updated)[0]
+
+    assert record.bookmark_position == changed.index("bookmark")
+    validate_applied_rematches(sidecar, updated, changed, (choice,))
 
 
 def test_unique_exact_quote_is_proposed_after_offset_shift(tmp_path: Path) -> None:

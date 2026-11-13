@@ -10,6 +10,7 @@ from pypdf.generic import ArrayObject, FloatObject, NameObject, TextStringObject
 from pure_text_annotator.annotations import (
     AnnotationDraft,
     AnnotationStore,
+    AnnotationType,
     create_record,
 )
 from pure_text_annotator.embed import PdfEmbedError, embed_pdf_annotations
@@ -426,6 +427,7 @@ def test_sidecar_edit_and_separate_pdf_addition_merge_without_data_loss(
     assert [record.quote for record in records] == ["Alpha", "beta"]
     assert records[0].note == "PDF baseline\nMarkdown addition"
     assert "_Imported PDF highlight without a comment._" in records[1].note
+    assert records[1].annotation_type is AnnotationType.HIGHLIGHT
 
 
 def test_concurrent_pdf_and_sidecar_edits_fail_without_overwriting_either(

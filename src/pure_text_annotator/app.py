@@ -27,12 +27,15 @@ from .annotations import (
     AnnotationLink,
     AnnotationRange,
     AnnotationStore,
+    AnnotationType,
     PdfAnchor,
+    annotation_note_text,
     create_record,
     delete_annotation_block,
     draft_from_selection,
     location_to_offset,
     parse_annotation_links,
+    update_annotation_block,
 )
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
 from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
@@ -88,8 +91,8 @@ Movement
 Annotations
   Ctrl-N / Ctrl-P         next / previous annotation
   v                       visual selection in source
-  a                       annotate selected source text
-  m                       annotation action menu
+  a                       add note to selected source text
+  m                       add types / filter / annotation tools
   R                       review PDF conflicts / stale rematches
   .                       align and center both panes manually
   S                       cycle Normal / Sync / Off alignment
@@ -503,7 +506,7 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             "shift+pageup", "vim_page_up(True)", "Select page up", show=False
         ),
         Binding("v", "toggle_visual", "Visual selection", show=False),
-        Binding("a", "annotate", "Add annotation", show=False),
+        Binding("a", "annotate", "Add note", show=False),
         Binding("i", "request_edit", "Edit source", show=False),
         Binding("u", "vim_undo", "Undo change", show=False),
         Binding("ctrl+r", "vim_redo", "Redo change", show=False),
@@ -1016,6 +1019,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         )
         self._active_link: Optional[AnnotationLink] = None
         self._annotation_links: tuple[AnnotationLink, ...] = ()
+        self._annotation_type_filter: Optional[AnnotationType] = None
         self._annotation_links_by_line: dict[int, AnnotationLink] = {}
         self._metadata_lines: frozenset[int] = frozenset()
         self._quote_lines: frozenset[int] = frozenset()
@@ -1080,6 +1084,23 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
         """The foldable metadata regions in canonical line coordinates."""
 
         return self._fold_regions
+
+    @property
+    def annotation_type_filter(self) -> Optional[AnnotationType]:
+        """The annotation kind currently visible, or ``None`` for all."""
+
+        return self._annotation_type_filter
+
+    @property
+    def visible_annotation_links(self) -> tuple[AnnotationLink, ...]:
+        """Return links admitted by the current type filter."""
+
+        selected = self._annotation_type_filter
+        return tuple(
+            link
+            for link in self._annotation_links
+            if selected is None or link.annotation_type is selected
+        )
 
     def full_line_for_display(self, display_line: int) -> int:
         """Map a visible row back to its canonical sidecar row."""
@@ -1183,7 +1204,7 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
                         f"annotation:{ordinal}",
                         yaml_start,
                         upper,
-                        f"Annotation {ordinal} metadata",
+                        f"Annotation {ordinal} {link.annotation_type.label} metadata",
                     )
                 )
 
@@ -1284,12 +1305,29 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
             and not self.edit_mode
             and region.key in self._closed_fold_keys
         }
+        hidden_annotations = {
+            link.sidecar_start_line: link
+            for link in self._annotation_links
+            if not self.edit_mode
+            and self._annotation_type_filter is not None
+            and link.annotation_type is not self._annotation_type_filter
+        }
         display_lines: list[str] = []
         display_to_full: list[int] = []
         full_to_display = [0] * len(lines)
 
         full_line = 0
         while full_line < len(lines):
+            hidden_link = hidden_annotations.get(full_line)
+            if hidden_link is not None:
+                display_row = max(0, len(display_lines) - 1)
+                for hidden_line in range(
+                    hidden_link.sidecar_start_line,
+                    min(hidden_link.sidecar_end_line + 1, len(lines)),
+                ):
+                    full_to_display[hidden_line] = display_row
+                full_line = hidden_link.sidecar_end_line + 1
+                continue
             region = closed_regions.get(full_line)
             if region is None:
                 display_row = len(display_lines)
@@ -1415,6 +1453,28 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
             self._active_link = None
         self._build_fold_regions()
         self._apply_fold_projection(full_cursor)
+
+    def set_annotation_type_filter(
+        self, annotation_type: Optional[AnnotationType]
+    ) -> None:
+        """Project only one annotation kind while retaining canonical text."""
+
+        selected = (
+            None if annotation_type is None else AnnotationType(annotation_type)
+        )
+        if selected is self._annotation_type_filter:
+            return
+        full_cursor = self._full_cursor_location()
+        viewport_position = self._cursor_viewport_position()
+        self._annotation_type_filter = selected
+        if (
+            self._active_link is not None
+            and selected is not None
+            and self._active_link.annotation_type is not selected
+        ):
+            self._active_link = None
+        self._apply_fold_projection(full_cursor)
+        self._restore_cursor_viewport_position(viewport_position)
 
     def show_link(
         self,
@@ -1735,7 +1795,7 @@ class NoteModal(ModalScreen[Optional[str]]):
         if len(preview) > 500:
             preview = preview[:499] + "…"
         with Vertical(id="note-dialog"):
-            yield Static("Add annotation", markup=False, id="note-title")
+            yield Static("Add note", markup=False, id="note-title")
             yield Static(
                 f"Source range [{self.draft.start}, {self.draft.end})",
                 markup=False,
@@ -2053,8 +2113,8 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
 
     #annotation-menu-buttons {
         height: 11;
-        grid-size: 3 3;
-        grid-columns: 1fr 1fr 1fr;
+        grid-size: 4 3;
+        grid-columns: 1fr 1fr 1fr 1fr;
         grid-rows: 3 3 3;
         grid-gutter: 1 1;
         margin-top: 1;
@@ -2067,7 +2127,11 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     """
 
     BINDINGS = [
-        Binding("a", "add", "Add annotation", priority=True, show=False),
+        Binding("a", "add", "Add note", priority=True, show=False),
+        Binding("h", "highlight", "Add highlight", priority=True, show=False),
+        Binding("b", "bookmark", "Add bookmark", priority=True, show=False),
+        Binding("f", "filter", "Filter annotations", priority=True, show=False),
+        Binding("x", "edit_current", "Edit current", priority=True, show=False),
         Binding("i", "edit", "Enter Edit mode", priority=True, show=False),
         Binding("s", "sync", "Switch Sync mode", priority=True, show=False),
         Binding("d", "delete", "Delete current", priority=True, show=False),
@@ -2083,11 +2147,13 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
         *,
         is_pdf: bool,
         sync_mode: SyncMode,
+        annotation_filter: Optional[AnnotationType],
     ) -> None:
         super().__init__()
         self.current_label = current_label
         self.is_pdf = is_pdf
         self.sync_mode = sync_mode
+        self.annotation_filter = annotation_filter
 
     def compose(self) -> ComposeResult:
         current = self.current_label or "No valid current annotation"
@@ -2104,8 +2170,30 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
             )
             with Grid(id="annotation-menu-buttons"):
                 yield Button(
-                    "A  Add annotation",
+                    "A  Add note",
                     id="menu-add-annotation",
+                )
+                yield Button(
+                    "H  Add highlight",
+                    id="menu-add-highlight",
+                )
+                yield Button(
+                    "B  Add bookmark",
+                    id="menu-add-bookmark",
+                )
+                filter_label = (
+                    self.annotation_filter.label
+                    if self.annotation_filter is not None
+                    else "All"
+                )
+                yield Button(
+                    f"F  Filter · {filter_label}",
+                    id="menu-filter-annotations",
+                )
+                yield Button(
+                    "X  Edit current annotation",
+                    id="menu-edit-current-annotation",
+                    disabled=self.current_label is None,
                 )
                 yield Button(
                     "I  Enter Edit mode",
@@ -2134,7 +2222,7 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
                     disabled=not self.is_pdf,
                 )
             yield Static(
-                "A/I/S/D/R/K/E chooses · Escape cancels · PDF writes are "
+                "A/H/B/F/X/I/S/D/R/K/E chooses · Escape cancels · PDF writes are "
                 "verified and atomic",
                 markup=False,
                 id="annotation-menu-hint",
@@ -2152,6 +2240,19 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
 
     def action_edit(self) -> None:
         self.dismiss("edit")
+
+    def action_highlight(self) -> None:
+        self.dismiss("highlight")
+
+    def action_bookmark(self) -> None:
+        self.dismiss("bookmark")
+
+    def action_filter(self) -> None:
+        self.dismiss("filter")
+
+    def action_edit_current(self) -> None:
+        if self.current_label is not None:
+            self.dismiss("edit-current")
 
     def action_sync(self) -> None:
         self.dismiss("sync")
@@ -2177,6 +2278,22 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     def on_add_pressed(self, _event: Button.Pressed) -> None:
         self.action_add()
 
+    @on(Button.Pressed, "#menu-add-highlight")
+    def on_highlight_pressed(self, _event: Button.Pressed) -> None:
+        self.action_highlight()
+
+    @on(Button.Pressed, "#menu-add-bookmark")
+    def on_bookmark_pressed(self, _event: Button.Pressed) -> None:
+        self.action_bookmark()
+
+    @on(Button.Pressed, "#menu-filter-annotations")
+    def on_filter_pressed(self, _event: Button.Pressed) -> None:
+        self.action_filter()
+
+    @on(Button.Pressed, "#menu-edit-current-annotation")
+    def on_edit_current_pressed(self, _event: Button.Pressed) -> None:
+        self.action_edit_current()
+
     @on(Button.Pressed, "#menu-enter-edit-mode")
     def on_edit_pressed(self, _event: Button.Pressed) -> None:
         self.action_edit()
@@ -2196,6 +2313,238 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     @on(Button.Pressed, "#menu-embed-pdf")
     def on_embed_pressed(self, _event: Button.Pressed) -> None:
         self.action_embed()
+
+
+class AnnotationFilterModal(ModalScreen[Optional[str]]):
+    """Choose the annotation kind projected in the sidecar pane."""
+
+    CSS = """
+    AnnotationFilterModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #annotation-filter-dialog {
+        width: 96%;
+        max-width: 100;
+        height: 9;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #annotation-filter-title,
+    #annotation-filter-hint {
+        height: 1;
+    }
+
+    #annotation-filter-title {
+        text-style: bold;
+        color: $accent;
+    }
+
+    #annotation-filter-hint {
+        color: $text-muted;
+    }
+
+    #annotation-filter-buttons {
+        height: 3;
+        margin-top: 1;
+        align-horizontal: center;
+    }
+
+    #annotation-filter-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("a", "choose('all')", "All", priority=True, show=False),
+        Binding("n", "choose('note')", "Notes", priority=True, show=False),
+        Binding("h", "choose('highlight')", "Highlights", priority=True, show=False),
+        Binding("b", "choose('bookmark')", "Bookmarks", priority=True, show=False),
+        Binding("escape", "cancel", "Cancel", priority=True, show=False),
+    ]
+
+    def __init__(self, current: Optional[AnnotationType]) -> None:
+        super().__init__()
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        label = self.current.label if self.current is not None else "All"
+        with Vertical(id="annotation-filter-dialog"):
+            yield Static(
+                f"Filter annotations by type · current: {label}",
+                markup=False,
+                id="annotation-filter-title",
+            )
+            with Horizontal(id="annotation-filter-buttons"):
+                yield Button("A  All", id="filter-all", variant="primary")
+                yield Button("N  Notes", id="filter-note")
+                yield Button("H  Highlights", id="filter-highlight")
+                yield Button("B  Bookmarks", id="filter-bookmark")
+            yield Static(
+                "The sidecar file is unchanged; search and Ctrl-N/P use visible entries",
+                markup=False,
+                id="annotation-filter-hint",
+            )
+
+    def on_mount(self) -> None:
+        selected = "all" if self.current is None else self.current.value
+        self.query_one(f"#filter-{selected}", Button).focus()
+
+    def action_choose(self, value: str) -> None:
+        self.dismiss(value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        prefix = "filter-"
+        if event.button.id and event.button.id.startswith(prefix):
+            self.action_choose(event.button.id[len(prefix) :])
+
+
+class EditAnnotationModal(
+    ModalScreen[Optional[tuple[AnnotationType, str]]]
+):
+    """Edit one annotation's structured type and optional Markdown body."""
+
+    CSS = """
+    EditAnnotationModal {
+        align: center bottom;
+        background: $background 10%;
+    }
+
+    #edit-annotation-dialog {
+        width: 96%;
+        max-width: 110;
+        height: 17;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round $accent;
+        background: $panel;
+    }
+
+    #edit-annotation-title {
+        height: 1;
+        text-style: bold;
+        color: $accent;
+    }
+
+    #edit-annotation-label,
+    #edit-annotation-type,
+    #edit-annotation-hint {
+        height: 1;
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+
+    #edit-annotation-types,
+    #edit-annotation-actions {
+        height: 3;
+        align-horizontal: center;
+    }
+
+    #edit-annotation-types Button,
+    #edit-annotation-actions Button {
+        margin: 0 1;
+    }
+
+    #edit-annotation-body {
+        height: 6;
+        border: solid $primary;
+    }
+    """
+
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save annotation", priority=True),
+        Binding("ctrl+enter", "save", "Save annotation", priority=True),
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(
+        self,
+        label: str,
+        annotation_type: AnnotationType,
+        note: str,
+    ) -> None:
+        super().__init__()
+        self.label = label
+        self.annotation_type = annotation_type
+        self.note = note
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-annotation-dialog"):
+            yield Static(
+                "Edit current annotation",
+                markup=False,
+                id="edit-annotation-title",
+            )
+            yield Static(self.label, markup=False, id="edit-annotation-label")
+            yield Static(
+                f"Type: {self.annotation_type.label}",
+                markup=False,
+                id="edit-annotation-type",
+            )
+            with Horizontal(id="edit-annotation-types"):
+                yield Button("Note", id="edit-type-note")
+                yield Button("Highlight", id="edit-type-highlight")
+                yield Button("Bookmark", id="edit-type-bookmark")
+            yield TextArea(
+                self.note,
+                soft_wrap=True,
+                show_line_numbers=False,
+                placeholder="Markdown body (required only for Note)",
+                id="edit-annotation-body",
+            )
+            yield Static(
+                "Choose a type, edit the body, then Ctrl+S · Escape cancels",
+                markup=False,
+                id="edit-annotation-hint",
+            )
+            with Horizontal(id="edit-annotation-actions"):
+                yield Button("Cancel", id="cancel-edit-annotation")
+                yield Button(
+                    "Save annotation",
+                    variant="primary",
+                    id="save-edit-annotation",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one("#edit-annotation-body", TextArea).focus()
+
+    def _select_type(self, annotation_type: AnnotationType) -> None:
+        self.annotation_type = annotation_type
+        self.query_one("#edit-annotation-type", Static).update(
+            f"Type: {annotation_type.label}"
+        )
+
+    def action_save(self) -> None:
+        note = self.query_one("#edit-annotation-body", TextArea).text.rstrip()
+        if self.annotation_type is AnnotationType.NOTE and not note.strip():
+            self.notify(
+                "A Note requires body text",
+                severity="warning",
+                timeout=1.5,
+            )
+            return
+        self.dismiss((self.annotation_type, note))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "save-edit-annotation":
+            self.action_save()
+        elif button_id == "cancel-edit-annotation":
+            self.action_cancel()
+        elif button_id and button_id.startswith("edit-type-"):
+            self._select_type(AnnotationType(button_id.removeprefix("edit-type-")))
 
 
 class DeleteAnnotationModal(ModalScreen[bool]):
@@ -3811,6 +4160,7 @@ class ViewerApp(App[None]):
             PdfConflictReport
         ] = None
         self._demo_reset_complete = False
+        self.annotation_type_filter: Optional[AnnotationType] = None
         try:
             self.demo_case = load_demo_case(source.path)
         except DemoCaseError as error:
@@ -3943,7 +4293,7 @@ class ViewerApp(App[None]):
         edit_hint = "i edit" if self.source.editable else "PDF source read-only"
         return (
             f"Ctrl-W W panes  {edit_hint}  Ctrl-S save  R rematch  "
-            "Ctrl-N/P notes  m menu  S sync  . align  zi/zo/zc folds  "
+            "Ctrl-N/P annotations  m types/filter  S sync  . align  zi/zo/zc folds  "
             "h/j/k/l move  gg/G/countgg jump  Ctrl-O/I history  "
             "Ctrl-E/Y scroll  zt/zz/zb place  "
             "u/Ctrl-R undo/redo  / search  n/N repeat  v select  "
@@ -3973,6 +4323,7 @@ class ViewerApp(App[None]):
 
     def _valid_annotation_links(self) -> tuple[AnnotationLink, ...]:
         source_length = len(self.query_one("#viewer", VimTextArea).text)
+        selected = self.annotation_type_filter
         return tuple(
             link
             for link in self.annotation_links
@@ -3980,6 +4331,7 @@ class ViewerApp(App[None]):
             <= link.source_range.start
             < link.source_range.end
             <= source_length
+            and (selected is None or link.annotation_type is selected)
         )
 
     def _current_annotation_link(self) -> Optional[AnnotationLink]:
@@ -4001,7 +4353,12 @@ class ViewerApp(App[None]):
             ordinal = 0
         source_range = link.source_range
         prefix = f"Annotation {ordinal}" if ordinal else "Annotation"
-        return f"{prefix} · source [{source_range.start}, {source_range.end})"
+        position = (
+            f"position {link.bookmark_position}"
+            if link.annotation_type is AnnotationType.BOOKMARK
+            else f"source [{source_range.start}, {source_range.end})"
+        )
+        return f"{prefix} · {link.annotation_type.label} · {position}"
 
     def _navigate_annotation(self, direction: int) -> None:
         """Move to the next or previous annotation in the focused pane."""
@@ -4072,7 +4429,7 @@ class ViewerApp(App[None]):
                 target.action_cancel_visual()
             target.move_cursor_with_jump(
                 self._source_location_for_offset(
-                    destination.source_range.start
+                    self._source_offset_for_link(destination)
                 ),
                 center=True,
             )
@@ -4138,7 +4495,7 @@ class ViewerApp(App[None]):
                 viewer.set_active_annotation_range(destination.source_range)
                 viewer.move_cursor(
                     self._source_location_for_offset(
-                        destination.source_range.start
+                        self._source_offset_for_link(destination)
                     ),
                     center=True,
                 )
@@ -4176,12 +4533,53 @@ class ViewerApp(App[None]):
                 current_label,
                 is_pdf=self.source.source_kind == "pdf",
                 sync_mode=self.sync_mode,
+                annotation_filter=self.annotation_type_filter,
             ),
             callback=self._finish_annotation_menu,
         )
 
     def _finish_annotation_menu(self, choice: Optional[str]) -> None:
         link = self._pending_menu_link
+        if choice == "edit-current":
+            if self._dirty_panes():
+                self._pending_menu_link = None
+                self.notify(
+                    "Save or discard text edits before editing one annotation",
+                    severity="warning",
+                    timeout=3,
+                )
+                return
+            if link is None or link not in self.annotation_links:
+                self._pending_menu_link = None
+                self.notify(
+                    "The current annotation is no longer available",
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+            try:
+                note = annotation_note_text(
+                    self.query_one(
+                        "#annotator", AnnotationTextArea
+                    ).canonical_text,
+                    link,
+                )
+            except ValueError as error:
+                self._pending_menu_link = None
+                self.notify(str(error), severity="error", timeout=4)
+                return
+            self._pending_menu_link = None
+            self.push_screen(
+                EditAnnotationModal(
+                    self._annotation_label(link),
+                    link.annotation_type,
+                    note,
+                ),
+                callback=lambda result: self._finish_edit_annotation(
+                    link, result
+                ),
+            )
+            return
         if choice == "delete":
             if self._dirty_panes():
                 self._pending_menu_link = None
@@ -4218,6 +4616,15 @@ class ViewerApp(App[None]):
         if choice == "add":
             viewer = self.query_one("#viewer", VimTextArea)
             viewer.action_annotate()
+        elif choice == "highlight":
+            self._start_typed_annotation(AnnotationType.HIGHLIGHT)
+        elif choice == "bookmark":
+            self._start_typed_annotation(AnnotationType.BOOKMARK)
+        elif choice == "filter":
+            self.push_screen(
+                AnnotationFilterModal(self.annotation_type_filter),
+                callback=self._finish_annotation_filter,
+            )
         elif choice == "edit":
             target = (
                 self.query_one("#annotator", AnnotationTextArea)
@@ -4236,6 +4643,101 @@ class ViewerApp(App[None]):
             self._embed_pdf_annotations_from_menu()
         else:
             self._refresh_status()
+
+    def _finish_edit_annotation(
+        self,
+        link: AnnotationLink,
+        result: Optional[tuple[AnnotationType, str]],
+    ) -> None:
+        """Persist one structured type/body edit and refresh both panes."""
+
+        if result is None:
+            self._refresh_status()
+            return
+        if self._dirty_panes() or link not in self.annotation_links:
+            self.notify(
+                "Documents changed before the edit was applied; reopen the menu",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        annotation_type, note = result
+        annotation_id = link.annotation_id
+        try:
+            updated = update_annotation_block(
+                self.query_one(
+                    "#annotator", AnnotationTextArea
+                ).canonical_text,
+                link,
+                annotation_type=annotation_type,
+                note=note,
+            )
+            saved = self.annotation_store.write(updated)
+        except (AnnotationFileError, ValueError) as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
+
+        self._replace_annotation_document(saved)
+        edited_link = next(
+            (
+                candidate
+                for candidate in self.annotation_links
+                if candidate.annotation_id == annotation_id
+            ),
+            None,
+        )
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        viewer = self.query_one("#viewer", VimTextArea)
+        visible = self._valid_annotation_links()
+        if edited_link is not None and edited_link in visible:
+            annotator.show_link(edited_link, move_cursor=True)
+            viewer.set_active_annotation_range(edited_link.source_range)
+        else:
+            annotator.clear_active_link()
+            viewer.set_active_annotation_range(None)
+        if self._menu_focus_pane == "annotator":
+            annotator.focus()
+        else:
+            viewer.focus()
+        self._refresh_status()
+        self._refresh_pdf_copy_after_annotation_save()
+        self.notify(
+            f"Updated {annotation_type.value} annotation"
+            + (
+                " · hidden by the current filter"
+                if edited_link is not None and edited_link not in visible
+                else ""
+            ),
+            timeout=2.5,
+        )
+
+    def _finish_annotation_filter(self, choice: Optional[str]) -> None:
+        """Apply a non-destructive type projection to the annotation pane."""
+
+        if choice is None:
+            self._refresh_status()
+            return
+        selected = None if choice == "all" else AnnotationType(choice)
+        self.annotation_type_filter = selected
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        annotator.set_annotation_type_filter(selected)
+        visible = self._valid_annotation_links()
+        viewer = self.query_one("#viewer", VimTextArea)
+        if visible:
+            destination = visible[0]
+            annotator.show_link(destination, move_cursor=True)
+            viewer.set_active_annotation_range(destination.source_range)
+        else:
+            annotator.clear_active_link()
+            viewer.set_active_annotation_range(None)
+        annotator.focus()
+        self._set_search_match("annotator", None)
+        self._refresh_status()
+        label = selected.label if selected is not None else "All"
+        self.notify(
+            f"Annotation filter: {label} · {len(visible)} visible",
+            timeout=2,
+        )
 
     def _finish_delete_annotation(self, confirmed: bool) -> None:
         link = self._pending_menu_link
@@ -4287,7 +4789,7 @@ class ViewerApp(App[None]):
                 viewer.set_active_annotation_range(destination.source_range)
                 viewer.move_cursor(
                     self._source_location_for_offset(
-                        destination.source_range.start
+                        self._source_offset_for_link(destination)
                     ),
                     center=True,
                 )
@@ -4300,7 +4802,7 @@ class ViewerApp(App[None]):
                     )
                     viewer.move_cursor(
                         self._source_location_for_offset(
-                            destination.source_range.start
+                            self._source_offset_for_link(destination)
                         ),
                         center=True,
                     )
@@ -4409,6 +4911,17 @@ class ViewerApp(App[None]):
         row = bisect_right(self._source_line_starts, offset) - 1
         return row, offset - self._source_line_starts[row]
 
+    @staticmethod
+    def _source_offset_for_link(link: AnnotationLink) -> int:
+        """Use a bookmark's exact cursor position, otherwise its range start."""
+
+        return (
+            link.bookmark_position
+            if link.annotation_type is AnnotationType.BOOKMARK
+            and link.bookmark_position is not None
+            else link.source_range.start
+        )
+
     def _align_annotation_to_source(self, *, record_jump: bool = False) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
@@ -4448,7 +4961,9 @@ class ViewerApp(App[None]):
         viewer.set_active_annotation_range(link.source_range)
         if viewer.visual_mode:
             viewer.action_cancel_visual()
-        destination = self._source_location_for_offset(link.source_range.start)
+        destination = self._source_location_for_offset(
+            self._source_offset_for_link(link)
+        )
         if record_jump:
             viewer.move_cursor_with_jump(destination, center=True)
         else:
@@ -4501,9 +5016,14 @@ class ViewerApp(App[None]):
             f"  |  MODIFIED: {', '.join(dirty_panes)}" if dirty_panes else ""
         )
         wrap_info = "wrap" if target.soft_wrap else "no wrap"
+        filter_info = (
+            self.annotation_type_filter.value.upper()
+            if self.annotation_type_filter is not None
+            else "ALL"
+        )
         self.query_one("#status", Static).update(
             f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
-            f"Ln {row + 1}, Col {column + 1}  |  {wrap_info}"
+            f"FILTER {filter_info}  |  Ln {row + 1}, Col {column + 1}  |  {wrap_info}"
             f"{command_info}{selection_info}{modified_info}"
         )
 
@@ -5935,26 +6455,64 @@ class ViewerApp(App[None]):
 
     @on(VimTextArea.AnnotationRequested)
     def on_annotation_requested(self, event: VimTextArea.AnnotationRequested) -> None:
+        self._start_typed_annotation(
+            AnnotationType.NOTE,
+            selection=event.selection,
+        )
+
+    def _start_typed_annotation(
+        self,
+        annotation_type: AnnotationType,
+        *,
+        selection: Optional[Selection] = None,
+    ) -> None:
+        """Prepare a note, highlight, or cursor-position bookmark."""
+
         if self._dirty_panes():
             self.notify(
-                "Save or discard text edits before adding a note",
+                "Save or discard text edits before adding an annotation",
                 severity="warning",
                 timeout=3,
             )
             return
-        try:
-            draft = draft_from_selection(
-                self.source.text,
-                event.selection.start,
-                event.selection.end,
+
+        annotation_type = AnnotationType(annotation_type)
+        viewer = self.query_one("#viewer", VimTextArea)
+        bookmark_position: Optional[int] = None
+        if annotation_type is AnnotationType.BOOKMARK:
+            source_text = self.source.text
+            if not source_text:
+                self.notify(
+                    "Cannot bookmark an empty source",
+                    severity="warning",
+                    timeout=2,
+                )
+                return
+            bookmark_position = location_to_offset(
+                source_text, viewer.cursor_location
             )
-        except ValueError:
-            self.notify(
-                "Select source text before annotating",
-                severity="warning",
-                timeout=2,
-            )
-            return
+            if bookmark_position < len(source_text):
+                start = bookmark_position
+                end = start + 1
+            else:
+                start = len(source_text) - 1
+                end = len(source_text)
+            draft = AnnotationDraft(start, end, source_text[start:end])
+        else:
+            current_selection = selection or viewer.selection
+            try:
+                draft = draft_from_selection(
+                    self.source.text,
+                    current_selection.start,
+                    current_selection.end,
+                )
+            except ValueError:
+                self.notify(
+                    f"Select source text before adding a {annotation_type.value}",
+                    severity="warning",
+                    timeout=2,
+                )
+                return
 
         pdf_anchor: Optional[PdfAnchor] = None
         if self.source.pdf_document is not None:
@@ -5969,11 +6527,24 @@ class ViewerApp(App[None]):
                 )
                 return
 
-        self.push_screen(
-            NoteModal(draft),
-            callback=lambda note: self._finish_annotation(
-                draft, note, pdf_anchor
-            ),
+        if annotation_type is AnnotationType.NOTE:
+            self.push_screen(
+                NoteModal(draft),
+                callback=lambda note: self._finish_annotation(
+                    draft,
+                    note,
+                    pdf_anchor,
+                    annotation_type=annotation_type,
+                ),
+            )
+            return
+
+        self._finish_annotation(
+            draft,
+            "",
+            pdf_anchor,
+            annotation_type=annotation_type,
+            bookmark_position=bookmark_position,
         )
 
     def _finish_annotation(
@@ -5981,6 +6552,9 @@ class ViewerApp(App[None]):
         draft: AnnotationDraft,
         note: Optional[str],
         pdf_anchor: Optional[PdfAnchor] = None,
+        *,
+        annotation_type: AnnotationType = AnnotationType.NOTE,
+        bookmark_position: Optional[int] = None,
     ) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         if note is None:
@@ -5990,6 +6564,8 @@ class ViewerApp(App[None]):
         record = create_record(
             draft,
             note,
+            annotation_type=annotation_type,
+            bookmark_position=bookmark_position,
             source_text=self.source.text,
             pdf_anchor=pdf_anchor,
         )
@@ -6008,18 +6584,29 @@ class ViewerApp(App[None]):
         )
         annotator = self.query_one("#annotator", AnnotationTextArea)
         annotator.load_annotation_text(updated)
+        annotator.set_annotation_type_filter(self.annotation_type_filter)
         annotator.set_annotation_links(self.annotation_links)
         self._set_search_match("annotator", None)
         viewer.set_annotation_ranges(self.annotation_ranges)
-        if self.annotation_links:
+        visible_links = self._valid_annotation_links()
+        if visible_links and self.annotation_links[-1] in visible_links:
             newest_link = self.annotation_links[-1]
             annotator.show_link(newest_link, move_cursor=True)
             viewer.set_active_annotation_range(newest_link.source_range)
+        elif self.annotation_links[-1] not in visible_links:
+            annotator.clear_active_link()
+            viewer.set_active_annotation_range(None)
         viewer.action_cancel_visual()
         viewer.focus()
         self._refresh_pdf_copy_after_annotation_save()
         self.notify(
-            f"Saved annotation for range [{draft.start}, {draft.end})",
+            f"Saved {annotation_type.value} for range "
+            f"[{draft.start}, {draft.end})"
+            + (
+                " · hidden by the current filter"
+                if self.annotation_links[-1] not in visible_links
+                else ""
+            ),
             timeout=2,
         )
 
