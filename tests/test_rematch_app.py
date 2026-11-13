@@ -1,11 +1,12 @@
 import asyncio
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject
-from textual.widgets import Static
+from textual.widgets import Button, LoadingIndicator, Static
 
 from pure_text_annotator.annotations import (
     AnnotationDraft,
@@ -17,6 +18,7 @@ from pure_text_annotator.app import (
     DemoResetModal,
     PdfConflictConfirmModal,
     PdfConflictReviewModal,
+    ProcessingModal,
     RematchConfirmModal,
     RematchReviewModal,
     VimTextArea,
@@ -24,7 +26,7 @@ from pure_text_annotator.app import (
 )
 from pure_text_annotator.embed import embed_pdf_annotations
 from pure_text_annotator.files import load_source_file, load_text_file
-from pure_text_annotator.rematch import parse_annotation_records
+from pure_text_annotator.rematch import parse_annotation_records, scan_rematches
 
 from pdf_fixtures import write_text_pdf
 
@@ -61,6 +63,47 @@ def test_annotation_menu_opens_rematch_review(tmp_path: Path) -> None:
 
         async with app.run_test(size=(120, 32)) as pilot:
             await pilot.press("m", "r")
+            await pilot.pause()
+            assert isinstance(app.screen, RematchReviewModal)
+
+    asyncio.run(scenario())
+
+
+def test_rematch_scan_shows_animated_processing_overlay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async def scenario() -> None:
+        source_path, _store, _before = prepare_shifted_case(tmp_path)
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+        started = threading.Event()
+        release = threading.Event()
+        original_scan = scan_rematches
+
+        def slow_scan(source_text: str, sidecar_text: str):
+            started.set()
+            assert release.wait(timeout=3)
+            return original_scan(source_text, sidecar_text)
+
+        monkeypatch.setattr(
+            "pure_text_annotator.app.scan_rematches", slow_scan
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            press_task = asyncio.create_task(pilot.press("shift+r"))
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.sleep(0.05)
+            try:
+                assert isinstance(app.screen, ProcessingModal)
+                assert app.screen.query_one(LoadingIndicator).is_mounted
+                message = app.screen.query_one(
+                    "#processing-message", Static
+                ).render().plain
+                assert "Scanning annotation anchors" in message
+            finally:
+                release.set()
+            await press_task
             await pilot.pause()
             assert isinstance(app.screen, RematchReviewModal)
 
@@ -149,6 +192,94 @@ def test_rematch_reviews_deleted_pdf_annotation_and_can_restore_it(
             assert annotations[0]["/NM"] == "deleted-pdf-note"
             assert annotations[0]["/Contents"] == "Edited Markdown note."
             assert "Edited Markdown note." in store.read_text()
+            assert list(tmp_path.glob("*.before-pdf-conflict-*"))
+
+    asyncio.run(scenario())
+
+
+def test_rematch_reviews_deleted_markdown_annotation_and_can_restore_it(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = write_text_pdf(
+            tmp_path / "markdown-delete.pdf",
+            ("Alpha unique target omega",),
+        )
+        source = load_source_file(source_path)
+        assert source.pdf_document is not None
+        start = source.text.index("unique target")
+        end = start + len("unique target")
+        anchor = source.pdf_document.anchor_for_range(start, end)
+        assert anchor is not None
+        store = AnnotationStore(source_path)
+        store.append(
+            create_record(
+                AnnotationDraft(start, end, "unique target"),
+                "Restore this PDF note.",
+                annotation_id="deleted-markdown-note",
+                source_text=source.text,
+                pdf_anchor=anchor,
+            )
+        )
+        embed_pdf_annotations(source_path)
+        synchronized = store.read_text()
+        record = parse_annotation_records(synchronized)[0]
+        externally_deleted = (
+            synchronized[: record.block_start]
+            + synchronized[record.block_end :]
+        )
+
+        app = ViewerApp(
+            load_source_file(source_path),
+            clipboard_writer=lambda _text: "test",
+        )
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            store.path.write_text(externally_deleted, encoding="utf-8")
+            await pilot.press("shift+r")
+            await pilot.pause()
+
+            assert isinstance(app.screen, PdfConflictReviewModal)
+            assert "deleted-markdown-note" not in app.query_one(
+                AnnotationTextArea
+            ).canonical_text
+            detail = app.screen.query_one(
+                "#pdf-conflict-review-detail", Static
+            ).render().plain
+            assert "deleted-from-markdown" in detail
+            assert "Restore this PDF note." in detail
+            assert (
+                str(
+                    app.screen.query_one(
+                        "#keep-markdown-conflict", Button
+                    ).label
+                )
+                == "Delete PDF"
+            )
+            assert (
+                str(
+                    app.screen.query_one(
+                        "#keep-pdf-conflict", Button
+                    ).label
+                )
+                == "Restore MD"
+            )
+
+            await pilot.click("#keep-pdf-conflict")
+            await pilot.click("#continue-pdf-conflicts")
+            await pilot.pause()
+            assert isinstance(app.screen, PdfConflictConfirmModal)
+            confirmation = app.screen.query_one(
+                "#pdf-conflict-confirm-message", Static
+            ).render().plain
+            assert "restore annotation into Markdown" in confirmation
+            await pilot.click("#apply-pdf-conflicts")
+            await pilot.pause()
+
+            restored = parse_annotation_records(store.read_text())
+            assert len(restored) == 1
+            assert restored[0].annotation_id == "deleted-markdown-note"
+            assert restored[0].note == "Restore this PDF note."
             assert list(tmp_path.glob("*.before-pdf-conflict-*"))
 
     asyncio.run(scenario())

@@ -65,7 +65,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"{result.annotations_path}"
         )
         for item in result.imported:
-            generated = " · generated note" if item.generated_note else ""
+            generated = " · no PDF comment" if item.generated_note else ""
             print(
                 f"  page {item.page_index + 1} · {item.subtype} · "
                 f"range [{item.start}, {item.end}) · "

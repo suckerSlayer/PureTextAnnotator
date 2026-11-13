@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from bisect import bisect_right
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, TypeVar
 
 from rich.text import Text
 from textual import on
@@ -18,7 +19,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Input, LoadingIndicator, Static, TextArea
 from textual.widgets.text_area import Selection
 
 from .annotations import (
@@ -73,6 +74,7 @@ RematchPreviewCallback = Callable[
     [RematchItem, Optional[RematchCandidate]], None
 ]
 PdfConflictPreviewCallback = Callable[[PdfAnnotationConflict], None]
+ProcessingResult = TypeVar("ProcessingResult")
 
 
 KEYBINDING_REFERENCE = """PURE TEXT ANNOTATOR KEYBINDINGS
@@ -2835,6 +2837,52 @@ def _compact_conflict_text(value: Optional[str], limit: int = 72) -> str:
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
+class ProcessingModal(ModalScreen[None]):
+    """Small blocking overlay whose indicator keeps animating during work."""
+
+    CSS = """
+    ProcessingModal {
+        align: center middle;
+        background: $background 20%;
+    }
+
+    #processing-dialog {
+        width: 52;
+        height: 7;
+        padding: 1 2;
+        border: round $accent;
+        background: $panel;
+        content-align: center middle;
+    }
+
+    #processing-message {
+        width: 1fr;
+        height: 1;
+        text-align: center;
+        text-style: bold;
+    }
+
+    #processing-indicator {
+        width: 1fr;
+        height: 1;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="processing-dialog"):
+            yield Static(
+                self.message,
+                markup=False,
+                id="processing-message",
+            )
+            yield LoadingIndicator(id="processing-indicator")
+
+
 class PdfConflictReviewModal(
     ModalScreen[Optional[tuple[PdfConflictResolution, ...]]]
 ):
@@ -2955,6 +3003,12 @@ class PdfConflictReviewModal(
     ) -> str:
         if decision is None:
             return "UNDECIDED"
+        if conflict.kind is PdfConflictKind.DELETED_FROM_MARKDOWN:
+            return (
+                "DELETE FROM PDF"
+                if decision is PdfConflictDecision.KEEP_MARKDOWN
+                else "RESTORE INTO MARKDOWN"
+            )
         if decision is PdfConflictDecision.KEEP_MARKDOWN:
             return (
                 "RESTORE INTO PDF"
@@ -2979,15 +3033,27 @@ class PdfConflictReviewModal(
             )
             return
         decision = self.decisions.get(conflict.annotation_id)
-        deleted = conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+        deleted_from_pdf = conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+        deleted_from_markdown = (
+            conflict.kind is PdfConflictKind.DELETED_FROM_MARKDOWN
+        )
         keep_markdown = self.query_one("#keep-markdown-conflict", Button)
         keep_pdf = self.query_one("#keep-pdf-conflict", Button)
-        keep_markdown.label = "Restore PDF" if deleted else "Use Markdown"
-        keep_pdf.label = "Delete MD" if deleted else "Use PDF"
+        if deleted_from_pdf:
+            keep_markdown.label = "Restore PDF"
+            keep_pdf.label = "Delete MD"
+        elif deleted_from_markdown:
+            keep_markdown.label = "Delete PDF"
+            keep_pdf.label = "Restore MD"
+        else:
+            keep_markdown.label = "Use Markdown"
+            keep_pdf.label = "Use PDF"
         sidecar_range = (
             f"[{conflict.sidecar_start}, {conflict.sidecar_end})"
             if conflict.sidecar_start is not None
             and conflict.sidecar_end is not None
+            else "deleted"
+            if deleted_from_markdown
             else "unavailable"
         )
         pdf_range = (
@@ -3000,21 +3066,41 @@ class PdfConflictReviewModal(
             if conflict.mapping_confidence is not None
             else ""
         )
+        ordinal_label = (
+            f"#{conflict.ordinal}"
+            if conflict.ordinal is not None
+            else "PDF-only"
+        )
+        sidecar_type_label = (
+            conflict.sidecar_type.value
+            if conflict.sidecar_type is not None
+            else "(deleted)"
+        )
+        pdf_type_label = (
+            conflict.pdf_type.value
+            if conflict.pdf_type is not None
+            else "(deleted)"
+        )
         detail = "\n".join(
             (
-                f"#{conflict.ordinal} - {conflict.kind.value} - "
+                f"{ordinal_label} - {conflict.kind.value} - "
                 f"{self._decision_label(conflict, decision)} - "
                 f"id {conflict.annotation_id}",
                 f"Markdown {sidecar_range}: "
+                f"type {sidecar_type_label} - "
                 f"{_compact_conflict_text(conflict.sidecar_quote)} - note: "
                 f"{_compact_conflict_text(conflict.sidecar_note)}",
                 f"PDF {pdf_range}{pdf_confidence}: "
+                f"type {pdf_type_label} - "
                 f"{_compact_conflict_text(conflict.pdf_quote)} - note: "
                 f"{_compact_conflict_text(conflict.pdf_note)}",
                 (
                     "Restore PDF keeps this Markdown record and writes it back; "
                     "Delete MD accepts the PDF deletion."
-                    if deleted
+                    if deleted_from_pdf
+                    else "Delete PDF accepts the Markdown deletion; "
+                    "Restore MD reimports the PDF annotation."
+                    if deleted_from_markdown
                     else "Use Markdown writes its range/note into the PDF; "
                     "Use PDF replaces the Markdown record."
                 ),
@@ -3219,21 +3305,55 @@ class PdfConflictConfirmModal(ModalScreen[Optional[str]]):
         if conflict is None or resolution is None:
             detail = "No conflict decision is available."
         else:
-            deleted = conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+            deleted_from_pdf = (
+                conflict.kind is PdfConflictKind.DELETED_FROM_PDF
+            )
+            deleted_from_markdown = (
+                conflict.kind is PdfConflictKind.DELETED_FROM_MARKDOWN
+            )
             if resolution.decision is PdfConflictDecision.KEEP_MARKDOWN:
-                action = "restore annotation into PDF" if deleted else "write Markdown version into PDF"
+                action = (
+                    "restore annotation into PDF"
+                    if deleted_from_pdf
+                    else "delete annotation from PDF"
+                    if deleted_from_markdown
+                    else "write Markdown version into PDF"
+                )
             else:
-                action = "delete Markdown record" if deleted else "replace Markdown with PDF version"
+                action = (
+                    "delete Markdown record"
+                    if deleted_from_pdf
+                    else "restore annotation into Markdown"
+                    if deleted_from_markdown
+                    else "replace Markdown with PDF version"
+                )
             confidence = (
                 f"PDF geometry mapping: ~{conflict.mapping_confidence}%."
                 if conflict.mapping_confidence is not None
                 else "PDF annotation is absent; this is a deletion decision."
             )
+            ordinal_label = (
+                f"#{conflict.ordinal}"
+                if conflict.ordinal is not None
+                else "PDF-only"
+            )
+            sidecar_type_label = (
+                conflict.sidecar_type.value
+                if conflict.sidecar_type is not None
+                else "deleted"
+            )
+            pdf_type_label = (
+                conflict.pdf_type.value
+                if conflict.pdf_type is not None
+                else "deleted"
+            )
             detail = (
-                f"#{conflict.ordinal} - {conflict.annotation_id}\n"
+                f"{ordinal_label} - {conflict.annotation_id}\n"
                 f"Decision: {action}. {confidence}\n"
-                f"Markdown note: {_compact_conflict_text(conflict.sidecar_note)}\n"
-                f"PDF note: {_compact_conflict_text(conflict.pdf_note)}"
+                f"Markdown ({sidecar_type_label}) note: "
+                f"{_compact_conflict_text(conflict.sidecar_note)}\n"
+                f"PDF ({pdf_type_label}) "
+                f"note: {_compact_conflict_text(conflict.pdf_note)}"
             )
             if self.preview_callback is not None:
                 self.preview_callback(conflict)
@@ -4153,6 +4273,7 @@ class ViewerApp(App[None]):
         self._pending_menu_link: Optional[AnnotationLink] = None
         self._menu_focus_pane = "viewer"
         self._suspend_alignment = False
+        self._processing = False
         self.demo_case: Optional[DemoCase] = None
         self._demo_case_error: Optional[str] = None
         self._initial_pdf_sync_error: Optional[str] = None
@@ -4257,6 +4378,29 @@ class ViewerApp(App[None]):
                 severity="warning",
                 timeout=6,
             )
+
+    async def _run_with_processing(
+        self,
+        message: str,
+        operation: Callable[[], ProcessingResult],
+    ) -> ProcessingResult:
+        """Run blocking work off the UI thread behind an animated overlay."""
+
+        if self._processing:
+            raise RuntimeError("another operation is already in progress")
+        self._processing = True
+        resume_alignment = not self._suspend_alignment
+        self._suspend_alignment = True
+        modal = ProcessingModal(message)
+        await self.push_screen(modal)
+        try:
+            return await asyncio.to_thread(operation)
+        finally:
+            if self.screen is modal:
+                await self.pop_screen()
+            self._processing = False
+            if resume_alignment:
+                self.call_after_refresh(self._resume_alignment)
 
     def _restore_initial_source_cursor(self) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
@@ -4636,7 +4780,7 @@ class ViewerApp(App[None]):
         elif choice == "sync":
             self.action_cycle_sync_mode()
         elif choice == "rematch":
-            self.action_rematch_annotations()
+            self.call_next(self.action_rematch_annotations)
         elif choice == "keybindings":
             self.push_screen(KeybindingsModal())
         elif choice == "embed":
@@ -5451,35 +5595,45 @@ class ViewerApp(App[None]):
         viewer.set_annotation_ranges(self.annotation_ranges)
         self._set_search_match("annotator", None)
 
-    def _review_pdf_conflicts_before_text_rematch(self) -> bool:
+    async def _review_pdf_conflicts_before_text_rematch(self) -> bool:
         """Open conflict review when PDF reconciliation needs user choices."""
 
         if self.source.source_kind != "pdf":
             return False
         viewer = self.query_one("#viewer", VimTextArea)
-        try:
-            current_source = load_source_file(self.source.path)
-        except TextFileError as error:
-            self.notify(str(error), severity="error", timeout=6)
-            return True
-        if current_source.text != viewer.text:
-            self.notify(
-                "The PDF text changed while the viewer was open; reopen it "
-                "before rematching",
-                severity="warning",
-                timeout=5,
-            )
-            return True
-        try:
+        viewer_text = viewer.text
+        source_path = self.source.path
+        annotations_path = self.annotation_store.path
+
+        def reconcile_pdf_pair() -> tuple[LoadedTextFile, Optional[str]]:
+            current_source = load_source_file(source_path)
+            if current_source.text != viewer_text:
+                return current_source, None
             import_pdf_text_markups(
                 current_source.path,
-                annotations_path=self.annotation_store.path,
+                annotations_path=annotations_path,
                 loaded_source=current_source,
             )
+            return current_source, self.annotation_store.read_text()
+
+        try:
+            current_source, refreshed = await self._run_with_processing(
+                "Checking PDF and Markdown annotations…",
+                reconcile_pdf_pair,
+            )
         except PdfImportConflictError as error:
+            try:
+                refreshed = self.annotation_store.read_text()
+            except AnnotationFileError as read_error:
+                self.notify(str(read_error), severity="error", timeout=5)
+                return True
+            annotator = self.query_one("#annotator", AnnotationTextArea)
+            if refreshed != annotator.canonical_text:
+                self._replace_annotation_document(refreshed)
             self._pending_pdf_conflict_report = error.report
             self._pending_pdf_conflict_resolutions = ()
-            self._capture_rematch_preview_state()
+            if self._rematch_preview_state is None:
+                self._capture_rematch_preview_state()
             self.push_screen(
                 PdfConflictReviewModal(
                     error.report,
@@ -5488,21 +5642,20 @@ class ViewerApp(App[None]):
                 callback=self._finish_pdf_conflict_review,
             )
             return True
-        except PdfImportError as error:
+        except (PdfImportError, TextFileError, AnnotationFileError) as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return True
+        if refreshed is None:
             self.notify(
-                f"Could not scan PDF annotation conflicts: {error}",
-                severity="error",
-                timeout=6,
+                "The PDF text changed while the viewer was open; reopen it "
+                "before rematching",
+                severity="warning",
+                timeout=5,
             )
             return True
 
         self.source = current_source
         self._saved_source = current_source
-        try:
-            refreshed = self.annotation_store.read_text()
-        except AnnotationFileError as error:
-            self.notify(str(error), severity="error", timeout=5)
-            return True
         annotator = self.query_one("#annotator", AnnotationTextArea)
         if refreshed != annotator.canonical_text:
             self._replace_annotation_document(refreshed)
@@ -5532,7 +5685,9 @@ class ViewerApp(App[None]):
             callback=self._finish_pdf_conflict_confirmation,
         )
 
-    def _finish_pdf_conflict_confirmation(self, choice: Optional[str]) -> None:
+    async def _finish_pdf_conflict_confirmation(
+        self, choice: Optional[str]
+    ) -> None:
         report = self._pending_pdf_conflict_report
         resolutions = self._pending_pdf_conflict_resolutions
         if report is None:
@@ -5556,9 +5711,9 @@ class ViewerApp(App[None]):
             return
         self._restore_rematch_preview()
         self._rematch_preview_state = None
-        self._apply_pdf_conflict_resolutions(report, resolutions)
+        await self._apply_pdf_conflict_resolutions(report, resolutions)
 
-    def _apply_pdf_conflict_resolutions(
+    async def _apply_pdf_conflict_resolutions(
         self,
         report: PdfConflictReport,
         resolutions: tuple[PdfConflictResolution, ...],
@@ -5572,15 +5727,31 @@ class ViewerApp(App[None]):
                 timeout=4,
             )
             return
-        try:
+        source_path = self.source.path
+        annotations_path = self.annotation_store.path
+
+        def apply_resolutions():
             result = resolve_pdf_annotation_conflicts(
-                self.source.path,
+                source_path,
                 report,
                 resolutions,
-                annotations_path=self.annotation_store.path,
+                annotations_path=annotations_path,
             )
-            refreshed_source = load_source_file(self.source.path)
-            refreshed_annotations = self.annotation_store.read_text()
+            return (
+                result,
+                load_source_file(source_path),
+                self.annotation_store.read_text(),
+            )
+
+        try:
+            (
+                result,
+                refreshed_source,
+                refreshed_annotations,
+            ) = await self._run_with_processing(
+                "Applying PDF/Markdown decisions…",
+                apply_resolutions,
+            )
         except (PdfImportError, TextFileError, AnnotationFileError) as error:
             self._pending_pdf_conflict_report = None
             self._pending_pdf_conflict_resolutions = ()
@@ -5605,16 +5776,20 @@ class ViewerApp(App[None]):
             if result.backup_path is not None
             else ""
         )
+        markdown_kept = sum(
+            item.decision is PdfConflictDecision.KEEP_MARKDOWN
+            for item in resolutions
+        )
+        pdf_kept = len(resolutions) - markdown_kept
         self.notify(
             f"Resolved {len(resolutions)} PDF annotation conflict(s): "
-            f"restored {len(result.restored_to_pdf)}, "
-            f"accepted from PDF {len(result.accepted_from_pdf)}."
+            f"Markdown kept {markdown_kept}, PDF kept {pdf_kept}."
             + backup
             + " Press R again for text rematches.",
             timeout=7,
         )
 
-    def action_rematch_annotations(self) -> None:
+    async def action_rematch_annotations(self) -> None:
         """Run a read-only scan and open review when stale records exist."""
 
         self._cancel_focused_vim_command()
@@ -5631,15 +5806,28 @@ class ViewerApp(App[None]):
                 timeout=3,
             )
             return
-        if self._review_pdf_conflicts_before_text_rematch():
+        self._capture_rematch_preview_state()
+        if await self._review_pdf_conflicts_before_text_rematch():
+            if self._pending_pdf_conflict_report is None:
+                self._restore_rematch_preview()
+                self._rematch_preview_state = None
             return
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        report = scan_rematches(viewer.text, annotator.canonical_text)
+        source_text = viewer.text
+        sidecar_text = annotator.canonical_text
+        report = await self._run_with_processing(
+            "Scanning annotation anchors…",
+            lambda: scan_rematches(source_text, sidecar_text),
+        )
         if not report.items:
+            self._restore_rematch_preview()
+            self._rematch_preview_state = None
             self.notify("No structured annotations to rematch", timeout=2)
             return
         if not report.stale_items:
+            self._restore_rematch_preview()
+            self._rematch_preview_state = None
             self.notify(
                 f"All {len(report.items)} annotation(s) still match",
                 timeout=2,
@@ -5658,7 +5846,6 @@ class ViewerApp(App[None]):
             self._pending_manual_range = AnnotationRange(start, end)
         else:
             self._pending_manual_range = None
-        self._capture_rematch_preview_state()
         self.push_screen(
             RematchReviewModal(
                 report,

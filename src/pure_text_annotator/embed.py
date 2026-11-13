@@ -36,7 +36,8 @@ from .rematch import ParsedAnnotation, parse_annotation_records, text_sha256
 COORDINATE_SYSTEM = "pdf-user-space-bottom-left"
 DEFAULT_HIGHLIGHT_COLOR = (1.0, 1.0, 0.0)
 ANNOTATION_AUTHOR = "Pure Text Annotator"
-ANNOTATION_SUBJECT = "Pure Text Annotator note"
+ANNOTATION_SUBJECT_PREFIX = "Pure Text Annotator"
+PTA_TYPE_KEY = "/PTAType"
 SUPPORTED_TEXT_MARKUP_SUBTYPES = frozenset(
     {"Highlight", "Underline", "Squiggly", "StrikeOut"}
 )
@@ -48,6 +49,12 @@ _YAML_CLOSE_RE = re.compile(r"(?m)^```[ \t]*(?:\n|$)")
 
 class PdfEmbedError(RuntimeError):
     """Raised when exporting would be unsafe or produce an ambiguous PDF."""
+
+
+def _annotation_subject(annotation_type: AnnotationType) -> str:
+    """Return the redundant, human-readable PDF type marker."""
+
+    return f"{ANNOTATION_SUBJECT_PREFIX} {annotation_type.value}"
 
 
 @dataclass(frozen=True)
@@ -506,7 +513,9 @@ def parse_pdf_embed_records(
             subtype = "Highlight"
             color = DEFAULT_HIGHLIGHT_COLOR
             author: Optional[str] = ANNOTATION_AUTHOR
-            subject: Optional[str] = ANNOTATION_SUBJECT
+            subject: Optional[str] = _annotation_subject(
+                record.annotation_type
+            )
             pdf_import_value = metadata.get("pdf_import")
             if pdf_import_value is not None:
                 pdf_import = _mapping(pdf_import_value, "pdf_import")
@@ -744,6 +753,9 @@ def _text_markup(
     annotation[NameObject("/NM")] = TextStringObject(record.annotation_id)
     annotation[NameObject("/M")] = TextStringObject(record.pdf_date)
     annotation[NameObject("/CreationDate")] = TextStringObject(record.pdf_date)
+    annotation[NameObject(PTA_TYPE_KEY)] = TextStringObject(
+        record.annotation_type.value
+    )
     if record.color:
         annotation[NameObject("/C")] = ArrayObject(
             FloatObject(value) for value in record.color
@@ -886,6 +898,10 @@ def _verify_output(
                 else None
             ) != record.subject:
                 raise PdfEmbedError("generated PDF annotation subject does not match")
+            if str(annotation.get(PTA_TYPE_KEY, "")) != record.annotation_type.value:
+                raise PdfEmbedError(
+                    "generated PDF annotation type marker does not match"
+                )
             if str(annotation.get("/M", "")) != record.pdf_date:
                 raise PdfEmbedError("generated PDF annotation timestamp does not match")
             if not _close_numbers(

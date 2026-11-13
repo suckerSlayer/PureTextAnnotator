@@ -1,4 +1,5 @@
 import hashlib
+import re
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
 
@@ -7,6 +8,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Highlight, Text
 from pypdf.generic import ArrayObject, FloatObject, NameObject, TextStringObject
 
+import pure_text_annotator.pdf_import as pdf_import_module
 from pure_text_annotator.annotations import (
     AnnotationDraft,
     AnnotationStore,
@@ -132,15 +134,22 @@ def test_imports_supported_pdf_text_markup_with_provenance(tmp_path: Path) -> No
     assert 'author: "Preview Author"' in saved
     assert 'creation_date: "D:20261108093000+08\'00\'"' in saved
     assert 'created_at: "2026-11-08T09:30:00+08:00"' in saved
-    assert "generated_note: true" in saved
+    assert "generated_note: true" not in saved
+    assert saved.count("generated_note: false") == 4
     assert saved.count("pdf_state_sha256:") == 4
     assert saved.count("sidecar_state_sha256:") == 4
-    assert "_Imported PDF underline without a comment._" in saved
+    assert "Imported PDF underline without a comment" not in saved
     assert hashlib.sha256(source_path.read_bytes()).hexdigest() in saved
     assert saved.count("pdf_anchor:") == 4
     records = parse_annotation_records(saved)
     assert len(records) == 4
     assert all(not record.errors for record in records)
+    assert [record.annotation_type for record in records] == [
+        AnnotationType.NOTE,
+        AnnotationType.HIGHLIGHT,
+        AnnotationType.NOTE,
+        AnnotationType.NOTE,
+    ]
     assert [record.quote for record in records] == [
         "Alpha",
         "beta",
@@ -165,6 +174,42 @@ def test_pdf_markup_import_is_idempotent(tmp_path: Path) -> None:
     assert second.already_imported_count == 0
     assert second.skipped == ()
     assert second.annotations_path.read_bytes() == first_bytes
+
+
+def test_import_migrates_the_exact_legacy_generated_note(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(tmp_path / "legacy-note.pdf", ("Alpha beta",))
+    _write_text_markups(
+        source_path,
+        (("beta", "Highlight", None, "legacy-generated-note"),),
+    )
+    imported = import_pdf_text_markups(source_path, use_pdf_cache=False)
+    annotation_id = imported.imported[0].annotation_id
+    sidecar = imported.annotations_path
+    legacy = sidecar.read_text(encoding="utf-8")
+    legacy = legacy.replace(
+        "generated_note: false", "generated_note: true", 1
+    )
+    legacy, placeholder_count = re.subn(
+        r"(?m)^(### Note[ \t]*\n)\n*(<!-- /pta:annotation -->)$",
+        r"\1\n_Imported PDF highlight without a comment._\n\n\2",
+        legacy,
+        count=1,
+    )
+    assert placeholder_count == 1
+    assert "_Imported PDF highlight without a comment._" in legacy
+    sidecar.write_text(legacy, encoding="utf-8")
+
+    result = import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    assert result.updated_annotation_ids == (annotation_id,)
+    migrated = sidecar.read_text(encoding="utf-8")
+    assert "Imported PDF highlight without a comment" not in migrated
+    assert "generated_note: true" not in migrated
+    record = parse_annotation_records(migrated)[0]
+    assert record.annotation_type is AnnotationType.HIGHLIGHT
+    assert record.note == ""
 
 
 def test_import_skips_markup_that_does_not_match_text(tmp_path: Path) -> None:
@@ -217,6 +262,8 @@ def test_embedding_does_not_duplicate_imported_source_markup(tmp_path: Path) -> 
     assert len(embedded_annotations) == 1
     assert str(embedded_annotations[0]["/NM"]).startswith("pdf-import-")
     assert embedded_annotations[0]["/Contents"] == "Existing Preview comment"
+    assert embedded_annotations[0]["/Subj"] == "Imported review"
+    assert embedded_annotations[0]["/PTAType"] == "note"
 
 
 def test_import_refreshes_exact_anchor_after_pdf_bytes_change(tmp_path: Path) -> None:
@@ -299,7 +346,7 @@ def test_pdf_import_cli_reports_new_and_existing_markup(
     captured = capsys.readouterr()
     assert "Imported 1 PDF text-markup annotation(s)" in captured.out
     assert "page 1 · Highlight" in captured.out
-    assert "100% confidence · generated note" in captured.out
+    assert "100% confidence · no PDF comment" in captured.out
     assert captured.err == ""
 
     assert main([str(source_path), "--no-pdf-cache"]) == 0
@@ -426,7 +473,7 @@ def test_sidecar_edit_and_separate_pdf_addition_merge_without_data_loss(
     assert len(records) == 2
     assert [record.quote for record in records] == ["Alpha", "beta"]
     assert records[0].note == "PDF baseline\nMarkdown addition"
-    assert "_Imported PDF highlight without a comment._" in records[1].note
+    assert records[1].note == ""
     assert records[1].annotation_type is AnnotationType.HIGHLIGHT
 
 
@@ -528,6 +575,147 @@ def test_concurrent_note_conflict_can_choose_either_version(
 
 
 @pytest.mark.parametrize(
+    ("decision", "expected_type"),
+    (
+        (PdfConflictDecision.KEEP_MARKDOWN, AnnotationType.HIGHLIGHT),
+        (PdfConflictDecision.KEEP_PDF, AnnotationType.BOOKMARK),
+    ),
+)
+def test_concurrent_type_conflict_shows_and_applies_either_type(
+    tmp_path: Path,
+    decision: PdfConflictDecision,
+    expected_type: AnnotationType,
+) -> None:
+    source_path = write_text_pdf(tmp_path / "typed-conflict.pdf", ("Alpha beta",))
+    _write_text_markups(
+        source_path,
+        (("beta", "Highlight", "Baseline", "typed-conflict"),),
+    )
+    imported = import_pdf_text_markups(source_path, use_pdf_cache=False)
+    annotation_id = imported.imported[0].annotation_id
+    sidecar = imported.annotations_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8").replace(
+            "type: note", "type: highlight", 1
+        ),
+        encoding="utf-8",
+    )
+
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    annotation = writer.pages[0]["/Annots"][0].get_object()
+    annotation[NameObject("/PTAType")] = TextStringObject("bookmark")
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+
+    with pytest.raises(PdfImportConflictError) as raised:
+        import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    conflict = raised.value.report.conflicts[0]
+    assert conflict.sidecar_type is AnnotationType.HIGHLIGHT
+    assert conflict.pdf_type is AnnotationType.BOOKMARK
+
+    resolve_pdf_annotation_conflicts(
+        source_path,
+        raised.value.report,
+        (PdfConflictResolution(annotation_id, decision),),
+        use_pdf_cache=False,
+        backup_label=f"before-{decision.value}-type-test",
+    )
+
+    record = parse_annotation_records(sidecar.read_text(encoding="utf-8"))[0]
+    assert record.annotation_type is expected_type
+    written = _page_annotations(source_path)[0]
+    assert written["/PTAType"] == expected_type.value
+    if decision is PdfConflictDecision.KEEP_MARKDOWN:
+        assert written["/Subj"] == "Imported review"
+
+
+def test_legacy_typed_pair_migrates_without_false_type_conflict(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "legacy-type.pdf", ("Alpha highlight omega",)
+    )
+    source = load_source_file(source_path)
+    assert source.pdf_document is not None
+    start = source.text.index("highlight")
+    end = start + len("highlight")
+    anchor = source.pdf_document.anchor_for_range(start, end)
+    assert anchor is not None
+    store = AnnotationStore(source_path)
+    store.append(
+        create_record(
+            AnnotationDraft(start, end, "highlight"),
+            "",
+            annotation_type=AnnotationType.HIGHLIGHT,
+            annotation_id="legacy-highlight",
+            created_at="2026-11-05T09:30:00+08:00",
+            source_text=source.text,
+            pdf_anchor=anchor,
+        )
+    )
+    embed_pdf_annotations(source_path)
+
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    annotation = writer.pages[0]["/Annots"][0].get_object()
+    del annotation[NameObject("/PTAType")]
+    annotation[NameObject("/Subj")] = TextStringObject(
+        "Pure Text Annotator note"
+    )
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+
+    loaded = load_source_file(source_path, use_pdf_cache=False)
+    scanned_annotation = _page_annotations(source_path)[0]
+    scanned = pdf_import_module._scan_markup(
+        annotation=scanned_annotation,
+        source=loaded,
+        page_index=0,
+        annotation_index=0,
+        subtype="Highlight",
+    )
+    sidecar_text = store.read_text()
+    parsed = parse_annotation_records(sidecar_text)[0]
+    metadata = pdf_import_module._record_metadata(
+        sidecar_text, parsed.block_start, parsed.block_end
+    )
+    legacy_pdf_hash = pdf_import_module._legacy_v1_pdf_state_fingerprint(
+        (scanned,)
+    )
+    legacy_sidecar_hash = (
+        pdf_import_module._legacy_v1_sidecar_state_fingerprint(
+            parsed, metadata
+        )
+    )
+    sidecar_text = re.sub(
+        r'(?m)^(  pdf_state_sha256: )"[0-9a-f]{64}"$',
+        rf'\1"{legacy_pdf_hash}"',
+        sidecar_text,
+        count=1,
+    )
+    sidecar_text = re.sub(
+        r'(?m)^(  sidecar_state_sha256: )"[0-9a-f]{64}"$',
+        rf'\1"{legacy_sidecar_hash}"',
+        sidecar_text,
+        count=1,
+    )
+    store.path.write_text(sidecar_text, encoding="utf-8")
+
+    result = import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    assert result.updated_annotation_ids == ("legacy-highlight",)
+    migrated = parse_annotation_records(store.read_text())[0]
+    assert migrated.annotation_type is AnnotationType.HIGHLIGHT
+    assert migrated.errors == ()
+
+
+@pytest.mark.parametrize(
     "decision",
     (PdfConflictDecision.KEEP_MARKDOWN, PdfConflictDecision.KEEP_PDF),
 )
@@ -598,3 +786,81 @@ def test_deleted_pdf_annotation_conflict_can_restore_or_delete(
         assert result.accepted_from_pdf == (annotation_id,)
         assert records == ()
         assert annotations == ()
+
+
+@pytest.mark.parametrize(
+    "decision",
+    (PdfConflictDecision.KEEP_MARKDOWN, PdfConflictDecision.KEEP_PDF),
+)
+def test_deleted_markdown_annotation_conflict_can_delete_pdf_or_restore_md(
+    tmp_path: Path,
+    decision: PdfConflictDecision,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "markdown-delete.pdf", ("Alpha beta",)
+    )
+    source = load_source_file(source_path)
+    assert source.pdf_document is not None
+    start = source.text.index("beta")
+    end = start + len("beta")
+    anchor = source.pdf_document.anchor_for_range(start, end)
+    assert anchor is not None
+    store = AnnotationStore(source_path)
+    store.append(
+        create_record(
+            AnnotationDraft(start, end, "beta"),
+            "Keep or delete this annotation.",
+            annotation_id="deleted-from-markdown",
+            source_text=source.text,
+            pdf_anchor=anchor,
+        )
+    )
+    embed_pdf_annotations(source_path)
+
+    synchronized = store.read_text()
+    record = parse_annotation_records(synchronized)[0]
+    deleted_sidecar = (
+        synchronized[: record.block_start]
+        + synchronized[record.block_end :]
+    )
+    store.path.write_text(deleted_sidecar, encoding="utf-8")
+    pdf_before_review = source_path.read_bytes()
+    sidecar_before_review = store.path.read_bytes()
+
+    with pytest.raises(PdfImportConflictError) as raised:
+        import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    report = raised.value.report
+    assert len(report.conflicts) == 1
+    conflict = report.conflicts[0]
+    assert conflict.annotation_id == "deleted-from-markdown"
+    assert conflict.kind is PdfConflictKind.DELETED_FROM_MARKDOWN
+    assert conflict.ordinal is None
+    assert conflict.sidecar_note is None
+    assert conflict.sidecar_type is None
+    assert conflict.pdf_note == "Keep or delete this annotation."
+    assert conflict.pdf_type is AnnotationType.NOTE
+    assert source_path.read_bytes() == pdf_before_review
+    assert store.path.read_bytes() == sidecar_before_review
+
+    result = resolve_pdf_annotation_conflicts(
+        source_path,
+        report,
+        (PdfConflictResolution("deleted-from-markdown", decision),),
+        use_pdf_cache=False,
+        backup_label=f"before-{decision.value}-markdown-delete-test",
+    )
+
+    assert result.backup_path is not None
+    assert result.backup_path.read_bytes() == sidecar_before_review
+    saved_records = parse_annotation_records(store.read_text())
+    pdf_annotations = _page_annotations(source_path)
+    if decision is PdfConflictDecision.KEEP_MARKDOWN:
+        assert saved_records == ()
+        assert pdf_annotations == ()
+    else:
+        assert len(saved_records) == 1
+        assert saved_records[0].annotation_id == "deleted-from-markdown"
+        assert saved_records[0].note == "Keep or delete this annotation."
+        assert len(pdf_annotations) == 1
+        assert pdf_annotations[0]["/NM"] == "deleted-from-markdown"

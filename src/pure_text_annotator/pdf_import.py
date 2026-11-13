@@ -43,7 +43,8 @@ SUPPORTED_TEXT_MARKUP_SUBTYPES = frozenset(
     {"Highlight", "Underline", "Squiggly", "StrikeOut"}
 )
 PTA_ANNOTATION_AUTHOR = "Pure Text Annotator"
-PTA_ANNOTATION_SUBJECT = "Pure Text Annotator note"
+PTA_ANNOTATION_SUBJECT_PREFIX = "Pure Text Annotator"
+PTA_TYPE_KEY = "/PTAType"
 IMPORT_ID_PREFIX = "pdf-import-"
 MIN_BOX_OVERLAP = 0.55
 MIN_MAPPING_CONFIDENCE = 75
@@ -68,6 +69,7 @@ class PdfConflictKind(str, Enum):
 
     BOTH_MODIFIED = "both-modified"
     DELETED_FROM_PDF = "deleted-from-pdf"
+    DELETED_FROM_MARKDOWN = "deleted-from-markdown"
 
 
 class PdfConflictDecision(str, Enum):
@@ -82,16 +84,18 @@ class PdfAnnotationConflict:
     """One record-level disagreement between a PDF and its sidecar."""
 
     annotation_id: str
-    ordinal: int
+    ordinal: Optional[int]
     kind: PdfConflictKind
     sidecar_start: Optional[int]
     sidecar_end: Optional[int]
     sidecar_quote: Optional[str]
     sidecar_note: Optional[str]
+    sidecar_type: Optional[AnnotationType]
     pdf_start: Optional[int]
     pdf_end: Optional[int]
     pdf_quote: Optional[str]
     pdf_note: Optional[str]
+    pdf_type: Optional[AnnotationType]
     pdf_page_index: Optional[int]
     mapping_confidence: Optional[int]
 
@@ -233,6 +237,8 @@ class _ScannedMarkup:
     color: Tuple[float, ...]
     fingerprint: str
     origin: str
+    annotation_type: Optional[AnnotationType]
+    pta_type_tagged: bool
 
 
 def _resolve(value: object) -> object:
@@ -246,6 +252,34 @@ def _optional_text(value: object) -> Optional[str]:
     resolved = _resolve(value)
     text = str(resolved).replace("\r\n", "\n").replace("\r", "\n")
     return text if text else None
+
+
+def _annotation_type_value(value: object) -> Optional[AnnotationType]:
+    """Decode a supported PTA type marker without trusting unknown values."""
+
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        return AnnotationType(text.strip().lower())
+    except ValueError:
+        return None
+
+
+def _annotation_type_from_subject(
+    subject: Optional[str],
+) -> Optional[AnnotationType]:
+    """Decode the redundant human-readable type stored in ``/Subj``."""
+
+    if subject is None:
+        return None
+    prefix = PTA_ANNOTATION_SUBJECT_PREFIX + " "
+    if not subject.startswith(prefix):
+        return None
+    try:
+        return AnnotationType(subject[len(prefix) :].strip().lower())
+    except ValueError:
+        return None
 
 
 def _numbers(value: object, field: str) -> Tuple[float, ...]:
@@ -504,6 +538,9 @@ def _scan_markup(
     annotation_name = _optional_text(annotation.get("/NM"))
     author = _optional_text(annotation.get("/T"))
     subject = _optional_text(annotation.get("/Subj"))
+    tagged_type = _annotation_type_value(annotation.get(PTA_TYPE_KEY))
+    subject_type = _annotation_type_from_subject(subject)
+    annotation_type = tagged_type or subject_type
     creation_date = _optional_text(annotation.get("/CreationDate"))
     modified_date = _optional_text(annotation.get("/M"))
     fingerprint = _fingerprint(
@@ -533,9 +570,11 @@ def _scan_markup(
         origin=(
             "pta"
             if author == PTA_ANNOTATION_AUTHOR
-            and subject == PTA_ANNOTATION_SUBJECT
+            and annotation_type is not None
             else "external"
         ),
+        annotation_type=annotation_type,
+        pta_type_tagged=tagged_type is not None,
     )
 
 
@@ -560,6 +599,70 @@ def _mapping_value(value: object) -> Mapping[str, object]:
 
 def _string_value(value: object) -> Optional[str]:
     return value if isinstance(value, str) and value else None
+
+
+def _migrate_legacy_generated_notes(
+    sidecar_text: str,
+) -> Tuple[str, Tuple[str, ...]]:
+    """Remove only the exact placeholder written by older importers."""
+
+    replacements: List[Tuple[int, int, str]] = []
+    migrated_ids: List[str] = []
+    for record in parse_annotation_records(sidecar_text):
+        if (
+            record.errors
+            or record.annotation_type is not AnnotationType.HIGHLIGHT
+            or record.note is None
+        ):
+            continue
+        metadata = _record_metadata(
+            sidecar_text, record.block_start, record.block_end
+        )
+        imported = _mapping_value(metadata.get("pdf_import"))
+        subtype = _string_value(imported.get("subtype"))
+        if imported.get("generated_note") is not True or subtype is None:
+            continue
+        placeholder = (
+            f"_Imported PDF {subtype.lower()} without a comment._"
+        )
+        if record.note != placeholder:
+            continue
+
+        block = sidecar_text[record.block_start : record.block_end]
+        block, metadata_count = re.subn(
+            r"(?m)^  generated_note:[ \t]*true[ \t]*$",
+            "  generated_note: false",
+            block,
+            count=1,
+        )
+        note_heading = re.search(
+            r"(?m)^### Note[ \t]*(?:\r?\n|$)", block
+        )
+        close_marker = re.search(
+            r"(?m)^<!-- /pta:annotation -->", block
+        )
+        if (
+            metadata_count != 1
+            or note_heading is None
+            or close_marker is None
+            or note_heading.end() > close_marker.start()
+        ):
+            continue
+        newline = "\r\n" if "\r\n" in block else "\n"
+        updated_block = (
+            block[: note_heading.end()].rstrip("\r\n")
+            + newline * 3
+            + block[close_marker.start() :]
+        )
+        replacements.append(
+            (record.block_start, record.block_end, updated_block)
+        )
+        migrated_ids.append(record.annotation_id)
+
+    migrated = sidecar_text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        migrated = migrated[:start] + replacement + migrated[end:]
+    return migrated, tuple(migrated_ids)
 
 
 @dataclass(frozen=True)
@@ -632,7 +735,51 @@ def _state_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _effective_annotation_type(part: _ScannedMarkup) -> AnnotationType:
+    """Use explicit PDF metadata before the legacy contents heuristic."""
+
+    if part.annotation_type is not None:
+        return part.annotation_type
+    return (
+        AnnotationType.HIGHLIGHT
+        if part.generated_note
+        else AnnotationType.NOTE
+    )
+
+
 def _pdf_state_fingerprint(parts: Sequence[_ScannedMarkup]) -> str:
+    return _state_sha256(
+        {
+            "version": 2,
+            "parts": [
+                {
+                    "page_index": part.page_index,
+                    "subtype": part.subtype,
+                    "annotation_name": part.annotation_name,
+                    "author": part.author,
+                    "subject": part.subject,
+                    "annotation_type": _effective_annotation_type(part).value,
+                    "creation_date": part.creation_date,
+                    "modified_date": part.modified_date,
+                    "contents": part.contents,
+                    "color": [round(value, 4) for value in part.color],
+                    "rect_pdf": [round(value, 4) for value in part.rect],
+                    "quad_points_pdf": [
+                        [round(value, 4) for value in quad]
+                        for quad in part.quads
+                    ],
+                }
+                for part in parts
+            ],
+        }
+    )
+
+
+def _legacy_v1_pdf_state_fingerprint(
+    parts: Sequence[_ScannedMarkup],
+) -> str:
+    """Reproduce the pre-type fingerprint for seamless 0.8.0 migration."""
+
     return _state_sha256(
         {
             "version": 1,
@@ -675,6 +822,7 @@ def _canonical_state_value(value: object) -> object:
 def _sidecar_state_fingerprint(
     *,
     annotation_id: str,
+    annotation_type: AnnotationType,
     start: Optional[int],
     end: Optional[int],
     quote: Optional[str],
@@ -684,8 +832,9 @@ def _sidecar_state_fingerprint(
 ) -> str:
     return _state_sha256(
         {
-            "version": 1,
+            "version": 2,
             "annotation_id": annotation_id,
+            "annotation_type": annotation_type.value,
             "start": start,
             "end": end,
             "quote": quote,
@@ -696,11 +845,31 @@ def _sidecar_state_fingerprint(
     )
 
 
+def _legacy_v1_sidecar_state_fingerprint(
+    record: ParsedAnnotation, metadata: Mapping[str, object]
+) -> str:
+    """Reproduce the pre-type sidecar fingerprint used by 0.8.0."""
+
+    return _state_sha256(
+        {
+            "version": 1,
+            "annotation_id": record.annotation_id,
+            "start": record.start,
+            "end": record.end,
+            "quote": record.quote,
+            "note": record.note,
+            "created_at": record.created_at,
+            "pdf_import": _canonical_state_value(metadata.get("pdf_import")),
+        }
+    )
+
+
 def _parsed_sidecar_state_fingerprint(
     record: ParsedAnnotation, metadata: Mapping[str, object]
 ) -> str:
     return _sidecar_state_fingerprint(
         annotation_id=record.annotation_id,
+        annotation_type=record.annotation_type,
         start=record.start,
         end=record.end,
         quote=record.quote,
@@ -757,6 +926,14 @@ def _legacy_pdf_state_unchanged(
     )
 
 
+def _pdf_note_for_part(part: _ScannedMarkup) -> str:
+    """Recover the PDF comment without synthesizing user-visible prose."""
+
+    if not part.generated_note:
+        return part.contents
+    return ""
+
+
 def _pdf_group_matches_sidecar(
     parts: Sequence[_ScannedMarkup],
     existing: ParsedAnnotation,
@@ -767,27 +944,20 @@ def _pdf_group_matches_sidecar(
     start = min(part.match.start for part in parts)
     end = max(part.match.end for part in parts)
     first = parts[0]
-    note = first.contents if not first.generated_note else (
-        existing.note
-        if existing.annotation_type is not AnnotationType.NOTE
-        and existing.note is not None
-        else f"_Imported PDF {first.subtype.lower()} without a comment._"
-    )
+    note = _pdf_note_for_part(first)
     return (
         start == existing.start
         and end == existing.end
         and source_text[start:end] == existing.quote
         and note == existing.note
+        and _effective_annotation_type(first) is existing.annotation_type
     )
 
 
 def _pdf_note(parts: Sequence[_ScannedMarkup]) -> Optional[str]:
     if not parts:
         return None
-    first = parts[0]
-    if first.generated_note:
-        return f"_Imported PDF {first.subtype.lower()} without a comment._"
-    return first.contents
+    return _pdf_note_for_part(parts[0])
 
 
 def _annotation_conflict(
@@ -806,6 +976,7 @@ def _annotation_conflict(
         sidecar_end=existing.end,
         sidecar_quote=existing.quote,
         sidecar_note=existing.note,
+        sidecar_type=existing.annotation_type,
         pdf_start=pdf_start,
         pdf_end=pdf_end,
         pdf_quote=(
@@ -816,10 +987,42 @@ def _annotation_conflict(
             else "\n".join(part.match.quote for part in parts)
         ),
         pdf_note=_pdf_note(parts),
+        pdf_type=_effective_annotation_type(parts[0]) if parts else None,
         pdf_page_index=parts[0].page_index if parts else None,
         mapping_confidence=(
             min(part.match.confidence for part in parts) if parts else None
         ),
+    )
+
+
+def _missing_sidecar_conflict(
+    annotation_id: str,
+    parts: Sequence[_ScannedMarkup],
+) -> PdfAnnotationConflict:
+    """Describe PDF markup whose synchronized Markdown record disappeared."""
+
+    if not parts:
+        raise ValueError("PDF annotation group is empty")
+    return PdfAnnotationConflict(
+        annotation_id=annotation_id,
+        ordinal=None,
+        kind=PdfConflictKind.DELETED_FROM_MARKDOWN,
+        sidecar_start=None,
+        sidecar_end=None,
+        sidecar_quote=None,
+        sidecar_note=None,
+        sidecar_type=None,
+        pdf_start=min(part.match.start for part in parts),
+        pdf_end=max(part.match.end for part in parts),
+        pdf_quote=(
+            parts[0].match.quote
+            if len(parts) == 1
+            else "\n".join(part.match.quote for part in parts)
+        ),
+        pdf_note=_pdf_note(parts),
+        pdf_type=_effective_annotation_type(parts[0]),
+        pdf_page_index=parts[0].page_index,
+        mapping_confidence=min(part.match.confidence for part in parts),
     )
 
 
@@ -837,12 +1040,13 @@ def _record_for_group(
     if document is None:
         raise ValueError("source does not provide PDF geometry")
     first = parts[0]
+    annotation_types = {_effective_annotation_type(part) for part in parts}
+    if len(annotation_types) != 1:
+        raise ValueError("PDF annotation fragments disagree on PTA type")
     pdf_start = min(part.match.start for part in parts)
     pdf_end = max(part.match.end for part in parts)
     pdf_quote = source.text[pdf_start:pdf_end]
-    pdf_note = first.contents if not first.generated_note else (
-        f"_Imported PDF {first.subtype.lower()} without a comment._"
-    )
+    pdf_note = _pdf_note_for_part(first)
     if prefer_existing:
         if (
             existing is None
@@ -871,11 +1075,11 @@ def _record_for_group(
         end = pdf_end
         quote = pdf_quote
         note = pdf_note
-        annotation_type = (
-            AnnotationType.HIGHLIGHT
-            if first.generated_note
-            else AnnotationType.NOTE
-        )
+        annotation_type = _effective_annotation_type(first)
+        if annotation_type is AnnotationType.NOTE and not note.strip():
+            raise ValueError(
+                "PDF annotation is typed as a note but has no comment"
+            )
     pdf_anchor = document.anchor_for_range(start, end)
     if pdf_anchor is None:
         raise ValueError("matched source range has no canonical PDF anchor")
@@ -900,13 +1104,16 @@ def _record_for_group(
             creation_date=first.creation_date,
             modified_date=first.modified_date,
             mapping_confidence=min(part.match.confidence for part in parts),
-            generated_note=first.generated_note,
+            # Retained for sidecar-format compatibility. New imports no longer
+            # synthesize a Markdown note when /Contents is absent.
+            generated_note=False,
             color=first.color,
             rect_pdf=first.rect,
             quad_points_pdf=first.quads,
         )
     sidecar_state_sha256 = _sidecar_state_fingerprint(
         annotation_id=annotation_id,
+        annotation_type=annotation_type,
         start=start,
         end=end,
         quote=quote,
@@ -927,6 +1134,15 @@ def _record_for_group(
         AnnotationDraft(start, end, quote),
         note,
         annotation_type=annotation_type,
+        bookmark_position=(
+            existing.bookmark_position
+            if annotation_type is AnnotationType.BOOKMARK
+            and existing is not None
+            and existing.bookmark_position is not None
+            else start
+            if annotation_type is AnnotationType.BOOKMARK
+            else None
+        ),
         annotation_id=annotation_id,
         created_at=created_at,
         source_text=source.text,
@@ -1202,10 +1418,29 @@ def import_pdf_text_markups(
         current_sidecar = store.read_text()
     except AnnotationFileError as error:
         raise PdfImportError(str(error)) from error
+    migrated_sidecar, migrated_note_ids = _migrate_legacy_generated_notes(
+        current_sidecar
+    )
     previous_document_sha256, previous_sidecar_sha256 = _sidecar_sync_state(
         current_sidecar
     )
-    if previous_document_sha256 == document.document_sha256:
+    sidecar_changed_since_sync = (
+        previous_sidecar_sha256 is not None
+        and _sidecar_content_sha256(current_sidecar)
+        != previous_sidecar_sha256
+    )
+    read_only_sidecar_scan = (
+        previous_document_sha256 == document.document_sha256
+        and sidecar_changed_since_sync
+        and not migrated_note_ids
+        and not normalized_resolutions
+        and not allow_sidecar_changes
+    )
+    if (
+        previous_document_sha256 == document.document_sha256
+        and not migrated_note_ids
+        and not sidecar_changed_since_sync
+    ):
         baseline_text = current_sidecar
         baseline_updated = False
         if previous_sidecar_sha256 is None:
@@ -1230,12 +1465,8 @@ def import_pdf_text_markups(
             refreshed_annotation_ids=(),
             document_revision_updated=baseline_updated,
         )
-    sidecar_changed_since_sync = (
-        previous_sidecar_sha256 is not None
-        and _sidecar_content_sha256(current_sidecar) != previous_sidecar_sha256
-    )
     refreshed_sidecar, refreshed_annotation_ids = _refresh_exact_pdf_anchors(
-        current_sidecar,
+        migrated_sidecar,
         loaded_source.text,
         document,
     )
@@ -1344,7 +1575,7 @@ def import_pdf_text_markups(
     replacements: List[Tuple[int, int, str]] = []
     new_records: List[AnnotationRecord] = []
     imported: List[PdfImportItem] = []
-    updated_ids: List[str] = []
+    updated_ids: List[str] = list(migrated_note_ids)
     removed_ids: List[str] = []
     conflicts: List[PdfAnnotationConflict] = []
     encountered_conflict_ids: set[str] = set()
@@ -1356,23 +1587,63 @@ def import_pdf_text_markups(
         existing_record = existing_pair[0] if existing_pair is not None else None
         identity = existing_pair[1] if existing_pair is not None else None
         prefer_existing = False
-        if existing_record is not None and identity is not None:
-            sidecar_record_changed = (
-                _parsed_sidecar_state_fingerprint(
-                    existing_record, identity.metadata
-                )
-                != identity.sidecar_state_sha256
-                if identity.sidecar_state_sha256 is not None
-                else sidecar_changed_since_sync
+        synchronized_pair_existed = (
+            previous_document_sha256 is not None
+            and previous_sidecar_sha256 is not None
+        )
+        pdf_group_was_previously_managed = (
+            previous_document_sha256 == document.document_sha256
+            or any(
+                part.pta_type_tagged or part.origin == "pta"
+                for part in parts
             )
-            pdf_record_changed = (
-                _pdf_state_fingerprint(parts) != identity.pdf_state_sha256
-                if identity.pdf_state_sha256 is not None
-                else not _legacy_pdf_state_unchanged(
+        )
+        if (
+            existing_record is None
+            and synchronized_pair_existed
+            and sidecar_changed_since_sync
+            and pdf_group_was_previously_managed
+        ):
+            encountered_conflict_ids.add(annotation_id)
+            decision = normalized_resolutions.get(annotation_id)
+            if decision is PdfConflictDecision.KEEP_MARKDOWN:
+                continue
+            if decision is not PdfConflictDecision.KEEP_PDF:
+                conflicts.append(
+                    _missing_sidecar_conflict(annotation_id, parts)
+                )
+                continue
+        if existing_record is not None and identity is not None:
+            if identity.sidecar_state_sha256 is not None:
+                sidecar_record_changed = (
+                    _parsed_sidecar_state_fingerprint(
+                        existing_record, identity.metadata
+                    )
+                    != identity.sidecar_state_sha256
+                    and _legacy_v1_sidecar_state_fingerprint(
+                        existing_record, identity.metadata
+                    )
+                    != identity.sidecar_state_sha256
+                )
+            else:
+                sidecar_record_changed = sidecar_changed_since_sync
+            if identity.pdf_state_sha256 is not None:
+                pdf_record_changed = (
+                    _pdf_state_fingerprint(parts)
+                    != identity.pdf_state_sha256
+                    and _legacy_v1_pdf_state_fingerprint(parts)
+                    != identity.pdf_state_sha256
+                )
+            else:
+                pdf_record_changed = not _legacy_pdf_state_unchanged(
                     parts, existing_record, identity
                 )
-            )
             if allow_sidecar_changes:
+                prefer_existing = True
+            elif not sidecar_record_changed and not pdf_record_changed:
+                # A synchronized sidecar is canonical for fields that older
+                # PDF metadata could not express, notably highlight/bookmark
+                # types written before /PTAType existed.
                 prefer_existing = True
             elif sidecar_record_changed and pdf_record_changed:
                 if _pdf_group_matches_sidecar(
@@ -1439,7 +1710,8 @@ def import_pdf_text_markups(
                     rendered,
                 )
             )
-            updated_ids.append(annotation_id)
+            if annotation_id not in updated_ids:
+                updated_ids.append(annotation_id)
 
     if complete_supported_scan:
         for existing_record, identity in existing_pairs:
@@ -1482,6 +1754,16 @@ def import_pdf_text_markups(
                 sidecar_sha256=text_sha256(current_sidecar),
                 conflicts=tuple(conflicts),
             )
+        )
+
+    if read_only_sidecar_scan:
+        return PdfImportResult(
+            source_path=source_path,
+            annotations_path=store.path,
+            imported=(),
+            skipped=tuple(skipped),
+            already_imported_count=already_imported_count,
+            refreshed_annotation_ids=(),
         )
 
     reconciled_sidecar = _apply_block_replacements(

@@ -83,20 +83,37 @@ text and PDF anchors, mapping confidence, subtype, external annotation name,
 author, subject, dates, color, original rectangle and quad points, source-PDF
 hash, and a stable import fingerprint. `pdf_sync` metadata records the durable
 identity confirmed in the PDF. A markup annotation with no `/Contents` comment
-receives a visibly generated note such as
-`Imported PDF highlight without a comment` for provenance and is classified as
-`type: highlight` rather than being forced into the note type.
+is classified as `type: highlight` and keeps an empty `### Note` section. PTA
+does not synthesize an explanatory sentence, so imported provenance cannot be
+mistaken for text written by the user.
+
+PTA-written markup carries the sidecar type redundantly: `/PTAType` stores the
+machine-readable value `note`, `highlight`, or `bookmark`, while `/Subj` stores
+the human-readable value `Pure Text Annotator <type>`. Import resolves type in
+that order: valid `/PTAType`, then the typed `/Subj`, then the legacy contents
+heuristic (non-empty comment means note; no comment means highlight). This lets
+a PDF written by this version reconstruct all three types even when its sidecar
+is missing. It also survives PDF tools that discard an unknown custom key but
+retain `/Subj`.
+Imported third-party markup retains its original author, subject, subtype, and
+color when written back; PTA still adds `/PTAType` so its sidecar type can round
+trip. A bookmark remains a one-character standard text-markup anchor rather
+than becoming a PDF outline entry.
 
 Reconciliation is bidirectional and identity-aware. New PDF markup is appended,
 and changed range or comment data replaces the corresponding sidecar block.
 Deleting a previously confirmed annotation from the PDF is never propagated
 silently: the sidecar record remains until the user chooses **Restore PDF** or
-**Delete MD** in `pta-view`'s `R` review. A sidecar-only record that has never
-been embedded is not mistaken for a deletion. Every non-conflicting change is
-committed with one atomic sidecar replacement. `pta-view` performs the same
-PDF-to-sidecar reconciliation before opening the panes. The import command
-itself never modifies the PDF. PDF files flattened through printing no longer
-contain editable annotation dictionaries and therefore cannot be reconciled.
+**Delete MD** in `pta-view`'s `R` review. The reverse direction is also guarded:
+if an externally edited sidecar removes a synchronized record while its PDF
+markup remains, choose **Delete PDF** to accept the Markdown deletion or
+**Restore MD** to recover the record from the PDF. A sidecar-only record that
+has never been embedded is not mistaken for a deletion. Every non-conflicting
+change is committed with one atomic sidecar replacement. `pta-view` performs
+the same PDF-to-sidecar reconciliation before opening the panes. The import
+command itself never modifies the PDF. PDF files flattened through printing no
+longer contain editable annotation dictionaries and therefore cannot be
+reconciled.
 
 Saving markup in another PDF program changes the PDF byte hash and can make
 older sidecar `pdf_anchor` blocks stale even when the extracted text and layout
@@ -119,6 +136,12 @@ differs, the record remains untouched and must use the normal reviewed rematch
 workflow. Opening the pair with `pta-view` immediately shows unresolved
 PDF/Markdown conflicts instead of resolving them blindly at the command line.
 If the review is canceled, press `R` to reopen it later.
+
+Type participates in both record-level state fingerprints and conflict review.
+When the PDF and Markdown change the same annotation to different types, the
+review and final confirmation show both values before **Use Markdown** or
+**Use PDF** is applied. Version-1 synchronization fingerprints written before
+PDF type tags existed are recognized and migrated without a false conflict.
 
 The importer uses the normal exact-hash PDF extraction cache. Use
 `--no-pdf-cache` or `--rebuild-pdf-cache` for the same diagnostics available to
@@ -170,7 +193,8 @@ The default sidecar is `paper.pdf.annotations.md`, and the default target is
 annotation carrying the optional body text and stable sidecar ID. PTA-created
 notes, highlights, and bookmarks use yellow `/Highlight`; imported records
 retain their supported subtype, color, author, and subject. A cross-page range
-produces one PDF annotation per page with the same ID and body text. `--output`
+produces one PDF annotation per page with the same ID, body text, and
+`/PTAType`. `--output`
 remains available for an
 explicit disposable export; `--force` applies only to replacing that explicit
 output.
@@ -204,7 +228,8 @@ range, and recomputed geometry must all match. No partial update is produced.
 The candidate PDF is reopened before replacement and checked for unchanged
 page content streams, page boxes, rotation, resource names, annotation counts,
 note data, subtype, color, and geometry. Unsupported annotations such as links,
-drawings, and stamps are preserved. The standalone command refuses encrypted
+drawings, and stamps are preserved. The machine-readable `/PTAType` marker is
+also verified before replacement. The standalone command refuses encrypted
 or signed PDFs. It also refuses to overwrite PDF-side edits made after the last
 complete reconciliation: run `pta-import`, inspect the Markdown changes, and
 then embed. If a range becomes stale, use the confirmed rematch workflow;
@@ -376,9 +401,17 @@ was canceled, `R` checks again before ordinary text rematching. The compact
 conflict panel leaves both panes visible and previews the affected quotation
 and note. Every conflict requires an explicit decision; none is preselected:
 
+PDF reconciliation, annotation-range scanning, and confirmed conflict
+application run off the UI thread. A compact animated **Processing** overlay
+blocks duplicate input while they run and disappears automatically on success
+or failure, so a slow PDF operation is not mistaken for a frozen interface.
+
 - If an annotation was deleted from the PDF but its Markdown record changed,
   choose **Restore PDF** to write the Markdown annotation back, or **Delete MD**
   to accept the PDF deletion and remove the sidecar record.
+- If a synchronized Markdown record was deleted externally but its PDF markup
+  remains, choose **Delete PDF** to accept the Markdown deletion, or **Restore
+  MD** to reconstruct the record from the PDF.
 - If the same annotation changed on both sides, choose **Use Markdown** to write
   that version into the PDF, or **Use PDF** to replace the sidecar record.
 
@@ -492,8 +525,9 @@ overlapping annotations remain separate records and navigation stops.
 For text and Markdown, all three types are sidecar-native. For a text-layer PDF,
 all three retain canonical text and geometry anchors and synchronize as standard
 PDF text markup; a bookmark is represented by its minimal character anchor.
-Markup imported from another PDF application without a comment becomes a
-highlight, while markup with a comment becomes a note.
+PTA type markers take priority on import, typed subjects provide a portable
+fallback, and only untyped markup uses the legacy rule where an external mark
+without a comment becomes a highlight and one with a comment becomes a note.
 
 ## Add a note
 

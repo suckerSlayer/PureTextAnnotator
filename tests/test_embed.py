@@ -127,6 +127,7 @@ def test_embed_single_page_note_as_standard_highlight(tmp_path: Path) -> None:
     assert annotation["/Contents"] == "Check this claim."
     assert annotation["/T"] == "Pure Text Annotator"
     assert annotation["/Subj"] == "Pure Text Annotator note"
+    assert annotation["/PTAType"] == "note"
     assert annotation["/M"] == "D:20261105013000Z"
     assert list(annotation["/C"]) == pytest.approx([1.0, 1.0, 0.0])
     assert int(annotation["/F"]) & 4
@@ -159,11 +160,20 @@ def test_embed_and_reconcile_typed_highlight_and_bookmark(tmp_path: Path) -> Non
     result = embed_pdf_annotations(source_path)
 
     annotations = _annotations(PdfReader(result.output_path), 0)
-    assert {str(item["/NM"]) for item in annotations} == {
+    by_id = {str(item["/NM"]): item for item in annotations}
+    assert set(by_id) == {
         "typed-highlight",
         "typed-bookmark",
     }
     assert all(str(item["/Contents"]) == "" for item in annotations)
+    assert by_id["typed-highlight"]["/Subj"] == (
+        "Pure Text Annotator highlight"
+    )
+    assert by_id["typed-highlight"]["/PTAType"] == "highlight"
+    assert by_id["typed-bookmark"]["/Subj"] == (
+        "Pure Text Annotator bookmark"
+    )
+    assert by_id["typed-bookmark"]["/PTAType"] == "bookmark"
     records = parse_annotation_records(
         AnnotationStore(source_path).read_text()
     )
@@ -180,6 +190,182 @@ def test_embed_and_reconcile_typed_highlight_and_bookmark(tmp_path: Path) -> Non
             AnnotationStore(source_path).read_text()
         )
     ] == [AnnotationType.HIGHLIGHT, AnnotationType.BOOKMARK]
+
+
+def test_pdf_only_recovery_preserves_all_pta_annotation_types(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "typed-recovery.pdf",
+        ("Alpha note highlight bookmark omega",),
+    )
+    source = load_source_file(source_path)
+    _append_note(
+        source,
+        "note",
+        annotation_id="recover-note",
+        note="Recovered note body.",
+    )
+    _append_note(
+        source,
+        "highlight",
+        annotation_id="recover-highlight",
+        note="",
+        annotation_type=AnnotationType.HIGHLIGHT,
+    )
+    bookmark_position = source.text.index("bookmark")
+    sidecar = _append_note(
+        source,
+        "b",
+        annotation_id="recover-bookmark",
+        note="",
+        annotation_type=AnnotationType.BOOKMARK,
+        bookmark_position=bookmark_position,
+    )
+    embed_pdf_annotations(source_path)
+    sidecar.unlink()
+
+    recovered = import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    assert recovered.imported_count == 3
+    records = {
+        record.annotation_id: record
+        for record in parse_annotation_records(
+            recovered.annotations_path.read_text(encoding="utf-8")
+        )
+    }
+    assert set(records) == {
+        "recover-note",
+        "recover-highlight",
+        "recover-bookmark",
+    }
+    assert records["recover-note"].annotation_type is AnnotationType.NOTE
+    assert records["recover-note"].note == "Recovered note body."
+    assert (
+        records["recover-highlight"].annotation_type
+        is AnnotationType.HIGHLIGHT
+    )
+    assert records["recover-highlight"].note == ""
+    assert (
+        records["recover-bookmark"].annotation_type
+        is AnnotationType.BOOKMARK
+    )
+    assert records["recover-bookmark"].note == ""
+    assert records["recover-bookmark"].bookmark_position == bookmark_position
+
+
+def test_pdf_subject_recovers_type_when_custom_marker_is_missing(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "subject-fallback.pdf",
+        ("Alpha highlight bookmark omega",),
+    )
+    source = load_source_file(source_path)
+    _append_note(
+        source,
+        "highlight",
+        annotation_id="subject-highlight",
+        note="",
+        annotation_type=AnnotationType.HIGHLIGHT,
+    )
+    bookmark_position = source.text.index("bookmark")
+    sidecar = _append_note(
+        source,
+        "b",
+        annotation_id="subject-bookmark",
+        note="",
+        annotation_type=AnnotationType.BOOKMARK,
+        bookmark_position=bookmark_position,
+    )
+    embed_pdf_annotations(source_path)
+
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    for raw in writer.pages[0]["/Annots"]:
+        annotation = raw.get_object()
+        del annotation[NameObject("/PTAType")]
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+    sidecar.unlink()
+
+    import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    records = parse_annotation_records(sidecar.read_text(encoding="utf-8"))
+    assert [record.annotation_type for record in records] == [
+        AnnotationType.HIGHLIGHT,
+        AnnotationType.BOOKMARK,
+    ]
+
+
+def test_pdf_custom_type_marker_takes_priority_over_subject(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "type-priority.pdf", ("Alpha highlight omega",)
+    )
+    source = load_source_file(source_path)
+    sidecar = _append_note(
+        source,
+        "highlight",
+        annotation_id="type-priority",
+        note="",
+        annotation_type=AnnotationType.HIGHLIGHT,
+    )
+    embed_pdf_annotations(source_path)
+
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    annotation = writer.pages[0]["/Annots"][0].get_object()
+    annotation[NameObject("/Subj")] = TextStringObject(
+        "Pure Text Annotator note"
+    )
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+    sidecar.unlink()
+
+    import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    record = parse_annotation_records(sidecar.read_text(encoding="utf-8"))[0]
+    assert record.annotation_type is AnnotationType.HIGHLIGHT
+    assert record.note == ""
+
+
+def test_removing_optional_highlight_body_in_pdf_updates_sidecar(
+    tmp_path: Path,
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "highlight-body.pdf", ("Alpha highlight omega",)
+    )
+    source = load_source_file(source_path)
+    sidecar = _append_note(
+        source,
+        "highlight",
+        annotation_id="highlight-body",
+        note="Optional detail",
+        annotation_type=AnnotationType.HIGHLIGHT,
+    )
+    embed_pdf_annotations(source_path)
+
+    reader = PdfReader(source_path)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    annotation = writer.pages[0]["/Annots"][0].get_object()
+    annotation[NameObject("/Contents")] = TextStringObject("")
+    with source_path.open("wb") as stream:
+        writer.write(stream)
+    writer.close()
+
+    result = import_pdf_text_markups(source_path, use_pdf_cache=False)
+
+    assert result.updated_annotation_ids == ("highlight-body",)
+    record = parse_annotation_records(sidecar.read_text(encoding="utf-8"))[0]
+    assert record.annotation_type is AnnotationType.HIGHLIGHT
+    assert record.note == ""
 
 
 def test_embed_multi_page_note_creates_one_highlight_per_page(
@@ -496,6 +682,31 @@ def test_output_verification_rejects_changed_page_content(
     monkeypatch.setattr(PdfWriter, "add_annotation", mutate_page_content)
 
     with pytest.raises(PdfEmbedError, match="page content differs"):
+        embed_pdf_annotations(source_path, loaded_source=source)
+
+    assert source_path.read_bytes() == source_before
+
+
+def test_output_verification_rejects_missing_pta_type_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = write_text_pdf(
+        tmp_path / "missing-type.pdf", ("Alpha beta gamma",)
+    )
+    source = load_source_file(source_path)
+    _append_note(source, "beta", annotation_id="typed", note="A note")
+    source_before = source_path.read_bytes()
+    original_add_annotation = PdfWriter.add_annotation
+
+    def drop_type_marker(writer, page_number, annotation, *args, **kwargs):
+        del annotation[NameObject("/PTAType")]
+        return original_add_annotation(
+            writer, page_number, annotation, *args, **kwargs
+        )
+
+    monkeypatch.setattr(PdfWriter, "add_annotation", drop_type_marker)
+
+    with pytest.raises(PdfEmbedError, match="type marker does not match"):
         embed_pdf_annotations(source_path, loaded_source=source)
 
     assert source_path.read_bytes() == source_before
