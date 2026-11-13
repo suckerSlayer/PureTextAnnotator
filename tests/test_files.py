@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from pure_text_annotator.file_safety import ConcurrentFileChangeError
 from pure_text_annotator.files import (
     TextFileError,
     load_text_file,
@@ -46,6 +47,23 @@ def test_atomic_save_preserves_bom_newlines_and_permissions(
     assert saved.text == "alpha\nbeta\ngamma"
     assert saved.line_count == 3
     assert saved.size_bytes == len(source.read_bytes())
+
+
+def test_atomic_save_refuses_bytes_changed_after_load(tmp_path: Path) -> None:
+    source = tmp_path / "notes.md"
+    source.write_text("loaded", encoding="utf-8")
+    loaded = load_text_file(source)
+    assert loaded.disk_fingerprint is not None
+    source.write_text("external", encoding="utf-8")
+
+    with pytest.raises(ConcurrentFileChangeError, match="changed on disk"):
+        save_text_file(
+            loaded,
+            "in-memory",
+            expected_fingerprint=loaded.disk_fingerprint,
+        )
+
+    assert source.read_text(encoding="utf-8") == "external"
 
 
 def test_rejects_unsupported_extension(tmp_path: Path) -> None:

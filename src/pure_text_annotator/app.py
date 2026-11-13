@@ -7,7 +7,8 @@ from bisect import bisect_right
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Iterable, Optional, TypeVar
+from pathlib import Path
+from typing import Callable, Iterable, Optional, Sequence, TypeVar
 
 from rich.text import Text
 from textual import on
@@ -30,17 +31,30 @@ from .annotations import (
     AnnotationStore,
     AnnotationType,
     PdfAnchor,
+    SourceBinding,
     annotation_note_text,
     create_record,
     delete_annotation_block,
     draft_from_selection,
+    inspect_source_binding,
     location_to_offset,
     parse_annotation_links,
+    rewrite_source_binding,
     update_annotation_block,
 )
 from .clipboard import ClipboardCopyError, copy_to_system_clipboard
 from .demo import DemoCase, DemoCaseError, load_demo_case, reset_demo_case
 from .files import LoadedTextFile, TextFileError, load_source_file, save_text_file
+from .file_safety import (
+    BufferChangeState,
+    ConcurrentFileChangeError,
+    DiskFingerprint,
+    DiskFingerprintError,
+    classify_buffer_change,
+    fingerprint_bytes,
+    fingerprint_path,
+    write_conflict_copy,
+)
 from .pdf_import import (
     PdfAnnotationConflict,
     PdfConflictDecision,
@@ -53,6 +67,7 @@ from .pdf_import import (
     resolve_pdf_annotation_conflicts,
 )
 from .rematch import (
+    AnnotationDocumentValidationError,
     RematchCandidate,
     RematchChoice,
     RematchItem,
@@ -64,6 +79,7 @@ from .rematch import (
     parse_annotation_records,
     scan_rematches,
     text_sha256,
+    validate_annotation_document,
     validate_applied_rematches,
 )
 
@@ -108,6 +124,8 @@ Search, editing, and files
   u / Ctrl-R              undo / redo
   Ctrl-W / Ctrl-H         delete previous word / character in Edit mode
   Ctrl-S                  save changes
+  m, then L               reload source and annotations from disk
+  m, then P               rebind a moved sidecar to this source
   y or Ctrl-C / Cmd-C     copy selection
   Ctrl-W w                switch panes
   q or Ctrl-Q             quit
@@ -120,6 +138,53 @@ class SyncMode(str, Enum):
     NORMAL = "Normal"
     SYNC = "Sync"
     OFF = "Off"
+
+
+@dataclass(frozen=True)
+class TrackedFileState:
+    """Current memory/disk relationship for one editor pane."""
+
+    pane: str
+    path: Path
+    baseline: DiskFingerprint
+    current: DiskFingerprint
+    change_state: BufferChangeState
+
+    @property
+    def memory_changed(self) -> bool:
+        return self.change_state in {
+            BufferChangeState.MEMORY_ONLY,
+            BufferChangeState.BOTH,
+        }
+
+    @property
+    def disk_changed(self) -> bool:
+        return self.change_state in {
+            BufferChangeState.DISK_ONLY,
+            BufferChangeState.BOTH,
+        }
+
+
+@dataclass(frozen=True)
+class ReloadPayload:
+    """Disk data read off the UI thread before a live-buffer replacement."""
+
+    source: Optional[LoadedTextFile]
+    source_fingerprint: Optional[DiskFingerprint]
+    annotation_text: Optional[str]
+    annotation_fingerprint: Optional[DiskFingerprint]
+
+
+@dataclass(frozen=True)
+class SourceRebindAssessment:
+    """Evidence shown before a moved sidecar is bound to this source."""
+
+    binding: SourceBinding
+    confidence: int
+    summary: str
+    exact_ranges: int
+    recoverable_quotes: int
+    record_count: int
 
 
 def _vim_word_kind(character: str) -> Optional[bool]:
@@ -573,6 +638,9 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             int, tuple[tuple[int, int], ...]
         ] = {}
         self._search_spans: dict[int, tuple[tuple[int, int], ...]] = {}
+        self._span_layout_text = ""
+        self._span_layout_lines: list[str] = []
+        self._span_layout_starts: list[int] = [0]
         self._normal_history_pending = False
         self.set_annotation_ranges(annotation_ranges)
 
@@ -638,12 +706,36 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             for annotation_range in self._annotation_ranges
             if annotation_range != active_range
         )
-        self._annotation_spans = self._build_annotation_spans(
-            self.text, inactive_ranges
+        self._annotation_spans = self._build_cached_annotation_spans(
+            inactive_ranges
         )
-        self._active_annotation_spans = self._build_annotation_spans(
-            self.text,
-            () if active_range is None else (active_range,),
+        self._active_annotation_spans = self._build_cached_annotation_spans(
+            () if active_range is None else (active_range,)
+        )
+
+    def _ensure_span_layout(self) -> None:
+        """Cache line boundaries shared by every source highlight layer."""
+
+        text = self.text
+        if text == self._span_layout_text and self._span_layout_lines:
+            return
+        self._span_layout_text = text
+        self._span_layout_lines = text.split("\n")
+        self._span_layout_starts = [0]
+        self._span_layout_starts.extend(
+            index + 1
+            for index, character in enumerate(text)
+            if character == "\n"
+        )
+
+    def _build_cached_annotation_spans(
+        self, annotation_ranges: Iterable[AnnotationRange]
+    ) -> dict[int, tuple[tuple[int, int], ...]]:
+        self._ensure_span_layout()
+        return self._build_spans_for_layout(
+            self._span_layout_lines,
+            self._span_layout_starts,
+            annotation_ranges,
         )
 
     def set_search_match(
@@ -657,8 +749,7 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             and 0 <= search_match.start < search_match.end <= len(self.text)
             else None
         )
-        self._search_spans = self._build_annotation_spans(
-            self.text,
+        self._search_spans = self._build_cached_annotation_spans(
             () if valid_match is None else (valid_match,),
         )
         self._line_cache.clear()
@@ -678,8 +769,7 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         if valid_range == self._rematch_candidate_range:
             return
         self._rematch_candidate_range = valid_range
-        self._rematch_candidate_spans = self._build_annotation_spans(
-            self.text,
+        self._rematch_candidate_spans = self._build_cached_annotation_spans(
             () if valid_range is None else (valid_range,),
         )
         self._line_cache.clear()
@@ -696,6 +786,18 @@ class VimTextArea(HalfPageBottomScrollTextArea):
             for index, character in enumerate(text)
             if character == "\n"
         )
+        return VimTextArea._build_spans_for_layout(
+            lines,
+            line_starts,
+            annotation_ranges,
+        )
+
+    @staticmethod
+    def _build_spans_for_layout(
+        lines: Sequence[str],
+        line_starts: Sequence[int],
+        annotation_ranges: Iterable[AnnotationRange],
+    ) -> dict[int, tuple[tuple[int, int], ...]]:
         spans_by_line: dict[int, list[tuple[int, int]]] = {}
 
         for annotation_range in annotation_ranges:
@@ -2081,6 +2183,272 @@ class QuitChangesModal(ModalScreen[Optional[str]]):
         self.action_cancel()
 
 
+class ExternalFileChangeModal(ModalScreen[Optional[str]]):
+    """Resolve external edits without ever replacing them silently."""
+
+    CSS = """
+    ExternalFileChangeModal {
+        align: center middle;
+        background: $background 10%;
+    }
+
+    #external-change-dialog {
+        width: 84%;
+        max-width: 92;
+        height: auto;
+        max-height: 18;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #external-change-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #external-change-message,
+    #external-change-files,
+    #external-change-hint {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #external-change-files,
+    #external-change-hint {
+        color: $text-muted;
+    }
+
+    #external-change-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #external-change-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("r", "reload", "Reload disk", priority=True),
+        Binding("c", "copy", "Preserve conflict copy", priority=True),
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(
+        self,
+        states: tuple[TrackedFileState, ...],
+        *,
+        manual_reload: bool = False,
+    ) -> None:
+        super().__init__()
+        self.states = states
+        self.manual_reload = manual_reload
+        self.can_copy = any(
+            state.memory_changed
+            and (manual_reload or state.disk_changed)
+            for state in states
+        )
+
+    def compose(self) -> ComposeResult:
+        title = (
+            "Reload files from disk"
+            if self.manual_reload
+            else "Files changed outside Pure Text Annotator"
+        )
+        rows = "\n".join(
+            f"{state.pane}: {state.change_state.label} · {state.path.name}"
+            for state in self.states
+        )
+        if any(
+            state.change_state is BufferChangeState.BOTH
+            for state in self.states
+        ):
+            message = (
+                "Saving now would overwrite external edits. Reload discards "
+                "the conflicting PTA buffer; Conflict copy preserves it first."
+            )
+        elif self.manual_reload and self.can_copy:
+            message = (
+                "Reload discards unsaved PTA buffers. Conflict copy preserves "
+                "them beside the originals before reloading."
+            )
+        else:
+            message = "Reload the changed disk content before continuing."
+        with Vertical(id="external-change-dialog"):
+            yield Static(title, markup=False, id="external-change-title")
+            yield Static(
+                message,
+                markup=False,
+                id="external-change-message",
+            )
+            yield Static(rows, markup=False, id="external-change-files")
+            yield Static(
+                "R reloads · C saves conflict copy then reloads · Escape cancels",
+                markup=False,
+                id="external-change-hint",
+            )
+            with Horizontal(id="external-change-buttons"):
+                yield Button("Cancel", id="cancel-external-change")
+                yield Button(
+                    "Conflict copy + reload",
+                    id="copy-external-change",
+                    variant="warning",
+                    disabled=not self.can_copy,
+                )
+                yield Button(
+                    "Reload disk",
+                    id="reload-external-change",
+                    variant="primary",
+                )
+
+    def action_reload(self) -> None:
+        self.dismiss("reload")
+
+    def action_copy(self) -> None:
+        if self.can_copy:
+            self.dismiss("copy")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#reload-external-change")
+    def on_reload_pressed(self, _event: Button.Pressed) -> None:
+        self.action_reload()
+
+    @on(Button.Pressed, "#copy-external-change")
+    def on_copy_pressed(self, _event: Button.Pressed) -> None:
+        self.action_copy()
+
+    @on(Button.Pressed, "#cancel-external-change")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
+class SourceRebindModal(ModalScreen[bool]):
+    """Confirm a moved or renamed source without obscuring both panes."""
+
+    CSS = """
+    SourceRebindModal {
+        align: center middle;
+        background: $background 10%;
+    }
+
+    #source-rebind-dialog {
+        width: 88%;
+        max-width: 100;
+        height: auto;
+        max-height: 17;
+        padding: 1 2;
+        border: round $warning;
+        background: $panel;
+    }
+
+    #source-rebind-title {
+        height: 1;
+        margin-bottom: 1;
+        text-style: bold;
+        color: $warning;
+    }
+
+    #source-rebind-message,
+    #source-rebind-paths,
+    #source-rebind-evidence,
+    #source-rebind-hint {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #source-rebind-paths,
+    #source-rebind-evidence,
+    #source-rebind-hint {
+        color: $text-muted;
+    }
+
+    #source-rebind-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #source-rebind-buttons Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("r", "rebind", "Rebind source", priority=True),
+        Binding("escape", "cancel", "Cancel", priority=True),
+    ]
+
+    def __init__(self, assessment: SourceRebindAssessment) -> None:
+        super().__init__()
+        self.assessment = assessment
+
+    def compose(self) -> ComposeResult:
+        binding = self.assessment.binding
+        recorded = (
+            str(binding.recorded_path)
+            if binding.recorded_path is not None
+            else binding.recorded_reference or "(unknown)"
+        )
+        with Vertical(id="source-rebind-dialog"):
+            yield Static(
+                "Source moved or renamed",
+                markup=False,
+                id="source-rebind-title",
+            )
+            yield Static(
+                "This sidecar names a different source. Rebinding changes only "
+                "the source path in its header; annotation ranges are untouched.",
+                markup=False,
+                id="source-rebind-message",
+            )
+            yield Static(
+                f"Recorded: {recorded}\nCurrent:  {binding.current_path}",
+                markup=False,
+                id="source-rebind-paths",
+            )
+            yield Static(
+                f"Compatibility estimate: {self.assessment.confidence}% · "
+                f"{self.assessment.summary}\n"
+                f"Exact ranges {self.assessment.exact_ranges}/"
+                f"{self.assessment.record_count} · quotations found "
+                f"{self.assessment.recoverable_quotes}/"
+                f"{self.assessment.record_count}",
+                markup=False,
+                id="source-rebind-evidence",
+            )
+            yield Static(
+                "R confirms · Escape keeps the sidecar read-only · use R rematch "
+                "after binding if the source content changed",
+                markup=False,
+                id="source-rebind-hint",
+            )
+            with Horizontal(id="source-rebind-buttons"):
+                yield Button("Cancel", id="cancel-source-rebind")
+                yield Button(
+                    "Rebind source",
+                    id="confirm-source-rebind",
+                    variant="warning",
+                )
+
+    def action_rebind(self) -> None:
+        self.dismiss(True)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-source-rebind")
+    def on_rebind_pressed(self, _event: Button.Pressed) -> None:
+        self.action_rebind()
+
+    @on(Button.Pressed, "#cancel-source-rebind")
+    def on_cancel_pressed(self, _event: Button.Pressed) -> None:
+        self.action_cancel()
+
+
 class AnnotationMenuModal(ModalScreen[Optional[str]]):
     """Offer annotation operations without hiding the two text panes."""
 
@@ -2115,8 +2483,8 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
 
     #annotation-menu-buttons {
         height: 11;
-        grid-size: 4 3;
-        grid-columns: 1fr 1fr 1fr 1fr;
+        grid-size: 5 3;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr;
         grid-rows: 3 3 3;
         grid-gutter: 1 1;
         margin-top: 1;
@@ -2140,6 +2508,8 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
         Binding("r", "rematch", "Rematch", priority=True, show=False),
         Binding("k", "keybindings", "Keybindings", priority=True, show=False),
         Binding("e", "embed", "Embed PDF", priority=True, show=False),
+        Binding("l", "reload", "Reload files", priority=True, show=False),
+        Binding("p", "rebind", "Rebind source", priority=True, show=False),
         Binding("escape", "cancel", "Cancel", priority=True, show=False),
     ]
 
@@ -2150,12 +2520,14 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
         is_pdf: bool,
         sync_mode: SyncMode,
         annotation_filter: Optional[AnnotationType],
+        needs_rebind: bool,
     ) -> None:
         super().__init__()
         self.current_label = current_label
         self.is_pdf = is_pdf
         self.sync_mode = sync_mode
         self.annotation_filter = annotation_filter
+        self.needs_rebind = needs_rebind
 
     def compose(self) -> ComposeResult:
         current = self.current_label or "No valid current annotation"
@@ -2223,8 +2595,17 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
                     id="menu-embed-pdf",
                     disabled=not self.is_pdf,
                 )
+                yield Button(
+                    "L  Reload files from disk",
+                    id="menu-reload-files",
+                )
+                yield Button(
+                    "P  Rebind source path",
+                    id="menu-rebind-source",
+                    disabled=not self.needs_rebind,
+                )
             yield Static(
-                "A/H/B/F/X/I/S/D/R/K/E chooses · Escape cancels · PDF writes are "
+                "A/H/B/F/X/I/S/D/R/K/E/L/P chooses · Escape cancels · writes are "
                 "verified and atomic",
                 markup=False,
                 id="annotation-menu-hint",
@@ -2268,6 +2649,13 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     def action_embed(self) -> None:
         if self.is_pdf:
             self.dismiss("embed")
+
+    def action_reload(self) -> None:
+        self.dismiss("reload")
+
+    def action_rebind(self) -> None:
+        if self.needs_rebind:
+            self.dismiss("rebind")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -2315,6 +2703,14 @@ class AnnotationMenuModal(ModalScreen[Optional[str]]):
     @on(Button.Pressed, "#menu-embed-pdf")
     def on_embed_pressed(self, _event: Button.Pressed) -> None:
         self.action_embed()
+
+    @on(Button.Pressed, "#menu-reload-files")
+    def on_reload_pressed(self, _event: Button.Pressed) -> None:
+        self.action_reload()
+
+    @on(Button.Pressed, "#menu-rebind-source")
+    def on_rebind_pressed(self, _event: Button.Pressed) -> None:
+        self.action_rebind()
 
 
 class AnnotationFilterModal(ModalScreen[Optional[str]]):
@@ -4274,6 +4670,13 @@ class ViewerApp(App[None]):
         self._menu_focus_pane = "viewer"
         self._suspend_alignment = False
         self._processing = False
+        self._pending_save_intent: Optional[str] = None
+        self._pending_external_states: tuple[TrackedFileState, ...] = ()
+        self._pending_external_manual_reload = False
+        self._annotation_load_error: Optional[str] = None
+        self._disk_tracking_error: Optional[str] = None
+        self._source_rebind_required = False
+        self._source_binding_error: Optional[str] = None
         self.demo_case: Optional[DemoCase] = None
         self._demo_case_error: Optional[str] = None
         self._initial_pdf_sync_error: Optional[str] = None
@@ -4288,24 +4691,69 @@ class ViewerApp(App[None]):
             self._demo_case_error = str(error)
         self.sync_mode = SyncMode.NORMAL
         self.annotation_store = annotation_store or AnnotationStore(source.path)
-        if source.source_kind == "pdf":
+        try:
+            self._source_disk_fingerprint = (
+                source.disk_fingerprint or fingerprint_path(source.path)
+            )
+        except DiskFingerprintError as error:
+            self._source_disk_fingerprint = DiskFingerprint.missing()
+            self._disk_tracking_error = str(error)
+        try:
+            (
+                self.annotation_text,
+                self._annotation_disk_fingerprint,
+            ) = self.annotation_store.read_snapshot()
+        except AnnotationFileError as error:
+            self._annotation_load_error = str(error)
+            self.annotation_text = f"# Annotation file error\n\n{error}\n"
+            try:
+                self._annotation_disk_fingerprint = fingerprint_path(
+                    self.annotation_store.path
+                )
+            except DiskFingerprintError as fingerprint_error:
+                self._annotation_disk_fingerprint = DiskFingerprint.missing()
+                self._disk_tracking_error = str(fingerprint_error)
+        self._source_binding = inspect_source_binding(
+            self.annotation_text,
+            sidecar_path=self.annotation_store.path,
+            current_source_path=source.path,
+        )
+        self._source_rebind_required = (
+            self._source_binding.managed
+            and self._source_binding.valid
+            and not self._source_binding.matches
+        )
+        if self._source_binding.managed and not self._source_binding.valid:
+            self._source_binding_error = self._source_binding.error
+
+        if (
+            source.source_kind == "pdf"
+            and not self._source_rebind_required
+            and self._source_binding_error is None
+        ):
             try:
                 import_pdf_text_markups(
                     source.path,
                     annotations_path=self.annotation_store.path,
                     loaded_source=source,
                 )
+                (
+                    self.annotation_text,
+                    self._annotation_disk_fingerprint,
+                ) = self.annotation_store.read_snapshot()
+                self._source_binding = inspect_source_binding(
+                    self.annotation_text,
+                    sidecar_path=self.annotation_store.path,
+                    current_source_path=source.path,
+                )
             except PdfImportConflictError as error:
                 self._initial_pdf_conflict_report = error.report
                 self._initial_pdf_sync_error = (
                     f"{error}. Press R to review the conflicts."
                 )
-            except PdfImportError as error:
+            except (PdfImportError, AnnotationFileError) as error:
                 self._initial_pdf_sync_error = str(error)
-        try:
-            self.annotation_text = self.annotation_store.read_text()
-        except AnnotationFileError as error:
-            self.annotation_text = f"# Annotation file error\n\n{error}\n"
+        self._refresh_source_binding()
         self._saved_annotation_text = self.annotation_text
         self.annotation_links = parse_annotation_links(self.annotation_text)
         self.annotation_ranges = tuple(
@@ -4360,8 +4808,18 @@ class ViewerApp(App[None]):
         self.query_one("#viewer", VimTextArea).focus()
         self._refresh_status()
         self.call_after_refresh(self._restore_initial_source_cursor)
-        if self._initial_pdf_conflict_report is not None:
+        if self._source_rebind_required:
+            self.call_after_refresh(self._open_source_rebind)
+        elif self._initial_pdf_conflict_report is not None:
             self.call_after_refresh(self._open_initial_pdf_conflict_review)
+        if self._source_binding_error is not None:
+            self.notify(
+                "Invalid annotation source binding: "
+                + self._source_binding_error
+                + ". The pair is read-only until the header is fixed and reloaded.",
+                severity="error",
+                timeout=7,
+            )
         if self._demo_case_error is not None:
             self.notify(
                 self._demo_case_error,
@@ -4376,6 +4834,13 @@ class ViewerApp(App[None]):
                 "Could not reconcile PDF annotations on open: "
                 + self._initial_pdf_sync_error,
                 severity="warning",
+                timeout=6,
+            )
+        if self._disk_tracking_error is not None:
+            self.notify(
+                "File change tracking is unavailable: "
+                + self._disk_tracking_error,
+                severity="error",
                 timeout=6,
             )
 
@@ -4464,6 +4929,278 @@ class ViewerApp(App[None]):
         ):
             dirty.append("annotations")
         return tuple(dirty)
+
+    def _tracked_file_states(self) -> tuple[TrackedFileState, ...]:
+        """Compare exact current disk bytes with both loaded baselines."""
+
+        dirty = set(self._dirty_panes())
+        source_current = fingerprint_path(self.source.path)
+        annotation_current = fingerprint_path(self.annotation_store.path)
+        return (
+            TrackedFileState(
+                pane="source",
+                path=self.source.path,
+                baseline=self._source_disk_fingerprint,
+                current=source_current,
+                change_state=classify_buffer_change(
+                    memory_changed="source" in dirty,
+                    disk_changed=(
+                        source_current != self._source_disk_fingerprint
+                    ),
+                ),
+            ),
+            TrackedFileState(
+                pane="annotations",
+                path=self.annotation_store.path,
+                baseline=self._annotation_disk_fingerprint,
+                current=annotation_current,
+                change_state=classify_buffer_change(
+                    memory_changed="annotations" in dirty,
+                    disk_changed=(
+                        annotation_current
+                        != self._annotation_disk_fingerprint
+                    ),
+                ),
+            ),
+        )
+
+    def _buffer_text_for_pane(self, pane: str) -> str:
+        if pane == "source":
+            return self.query_one("#viewer", VimTextArea).text
+        if pane == "annotations":
+            return self.query_one(
+                "#annotator", AnnotationTextArea
+            ).canonical_text
+        raise ValueError(f"unknown tracked pane: {pane}")
+
+    def _refresh_disk_baselines(self) -> None:
+        """Accept the current pair after a verified external transaction."""
+
+        self._source_disk_fingerprint = fingerprint_path(self.source.path)
+        self._annotation_disk_fingerprint = fingerprint_path(
+            self.annotation_store.path
+        )
+
+    def _refresh_source_binding(self) -> SourceBinding:
+        """Re-evaluate which source the currently loaded sidecar declares."""
+
+        binding = inspect_source_binding(
+            self.annotation_text,
+            sidecar_path=self.annotation_store.path,
+            current_source_path=self.source.path,
+        )
+        self._source_binding = binding
+        self._source_rebind_required = (
+            binding.managed and binding.valid and not binding.matches
+        )
+        self._source_binding_error = (
+            binding.error if binding.managed and not binding.valid else None
+        )
+        return binding
+
+    def _assess_source_binding(self) -> SourceRebindAssessment:
+        """Estimate how well the loaded anchors fit the proposed source path."""
+
+        binding = self._refresh_source_binding()
+        records = parse_annotation_records(self.annotation_text)
+        record_count = len(records)
+        current_text = self.source.text
+        current_hash = text_sha256(current_text)
+        exact_ranges = 0
+        recoverable_quotes = 0
+        scores: list[int] = []
+        matching_document_hash = False
+
+        for record in records:
+            if record.source_sha256 == current_hash:
+                matching_document_hash = True
+            if (
+                record.start is None
+                or record.end is None
+                or record.quote is None
+                or record.errors
+            ):
+                scores.append(0)
+                continue
+
+            exact = (
+                0 <= record.start < record.end <= len(current_text)
+                and current_text[record.start : record.end] == record.quote
+            )
+            if exact:
+                exact_ranges += 1
+                recoverable_quotes += 1
+                scores.append(96)
+                continue
+
+            first = current_text.find(record.quote)
+            if first < 0:
+                scores.append(15)
+                continue
+            recoverable_quotes += 1
+            repeated = current_text.find(record.quote, first + 1) >= 0
+            scores.append(65 if repeated else 85)
+
+        if matching_document_hash:
+            confidence = 100
+            summary = "a stored whole-document hash matches"
+        elif not records:
+            confidence = 50
+            summary = "no annotation anchors are available to compare"
+        else:
+            confidence = round(sum(scores) / record_count)
+            if exact_ranges == record_count:
+                summary = "every recorded range still matches exactly"
+            elif recoverable_quotes == record_count:
+                summary = "all quotations remain present, but some ranges moved"
+            elif recoverable_quotes:
+                summary = "only some quotations can be located in this source"
+            else:
+                summary = "no recorded quotation was found in this source"
+
+        return SourceRebindAssessment(
+            binding=binding,
+            confidence=confidence,
+            summary=summary,
+            exact_ranges=exact_ranges,
+            recoverable_quotes=recoverable_quotes,
+            record_count=record_count,
+        )
+
+    def _open_source_rebind(self) -> None:
+        """Open the compact, explicit path-rebinding confirmation."""
+
+        binding = self._refresh_source_binding()
+        if self._source_binding_error is not None:
+            self.notify(
+                "Cannot rebind this sidecar: " + self._source_binding_error,
+                severity="error",
+                timeout=6,
+            )
+            return
+        if not binding.managed:
+            self.notify(
+                "This annotation file has no PTA source binding",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        if not self._source_rebind_required:
+            self.notify(
+                "The annotation sidecar is already bound to this source",
+                timeout=2,
+            )
+            return
+        if isinstance(self.screen, SourceRebindModal):
+            return
+        self.push_screen(
+            SourceRebindModal(self._assess_source_binding()),
+            callback=self._finish_source_rebind,
+        )
+
+    def _require_confirmed_source_binding(self, action: str) -> bool:
+        """Keep both documents read-only until a path mismatch is reviewed."""
+
+        self._refresh_source_binding()
+        if self._source_binding_error is not None:
+            self.notify(
+                "Cannot "
+                + action
+                + ": the sidecar source header is invalid ("
+                + self._source_binding_error
+                + ")",
+                severity="error",
+                timeout=6,
+            )
+            return False
+        if not self._source_rebind_required:
+            return True
+        self.notify(
+            f"Rebind this sidecar before you {action}",
+            severity="warning",
+            timeout=3,
+        )
+        self._open_source_rebind()
+        return False
+
+    def _finish_source_rebind(self, confirmed: bool) -> None:
+        """Atomically rewrite only the managed front matter source field."""
+
+        if not confirmed:
+            self._refresh_status()
+            self.notify(
+                "Rebinding cancelled; source and annotations remain read-only",
+                severity="warning",
+                timeout=3,
+            )
+            return
+        if self._dirty_panes():
+            self.notify(
+                "Reload or discard in-memory edits before rebinding",
+                severity="warning",
+                timeout=3,
+            )
+            return
+
+        try:
+            states = self._tracked_file_states()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+        if any(state.disk_changed for state in states):
+            self.notify(
+                "A tracked file changed before rebinding; review and reload it",
+                severity="warning",
+                timeout=4,
+            )
+            self._pending_save_intent = None
+            self._open_external_change_prompt(
+                tuple(
+                    state
+                    for state in states
+                    if state.change_state is not BufferChangeState.UNCHANGED
+                ),
+                manual_reload=True,
+            )
+            return
+
+        try:
+            updated = rewrite_source_binding(
+                self.annotation_text,
+                sidecar_path=self.annotation_store.path,
+                current_source_path=self.source.path,
+            )
+            validate_annotation_document(updated)
+            saved = self.annotation_store.write(
+                updated,
+                expected_fingerprint=self._annotation_disk_fingerprint,
+            )
+        except (
+            AnnotationDocumentValidationError,
+            AnnotationFileError,
+            ConcurrentFileChangeError,
+            DiskFingerprintError,
+            ValueError,
+        ) as error:
+            self.notify(
+                f"Could not rebind the source: {error}",
+                severity="error",
+                timeout=7,
+            )
+            return
+
+        self._annotation_disk_fingerprint = fingerprint_bytes(
+            saved.encode("utf-8")
+        )
+        self._replace_annotation_document(saved)
+        self._refresh_source_binding()
+        self._refresh_titlebar()
+        self._refresh_status()
+        self.notify(
+            "Source path rebound; annotation ranges were not changed. "
+            "Press R to review rematches if the content moved.",
+            timeout=6,
+        )
 
     def _valid_annotation_links(self) -> tuple[AnnotationLink, ...]:
         source_length = len(self.query_one("#viewer", VimTextArea).text)
@@ -4678,12 +5415,28 @@ class ViewerApp(App[None]):
                 is_pdf=self.source.source_kind == "pdf",
                 sync_mode=self.sync_mode,
                 annotation_filter=self.annotation_type_filter,
+                needs_rebind=self._source_rebind_required,
             ),
             callback=self._finish_annotation_menu,
         )
 
     def _finish_annotation_menu(self, choice: Optional[str]) -> None:
         link = self._pending_menu_link
+        write_choices = {
+            "add",
+            "highlight",
+            "bookmark",
+            "edit-current",
+            "edit",
+            "delete",
+            "rematch",
+            "embed",
+        }
+        if choice in write_choices and not self._require_confirmed_source_binding(
+            "modify or reconcile this document pair"
+        ):
+            self._pending_menu_link = None
+            return
         if choice == "edit-current":
             if self._dirty_panes():
                 self._pending_menu_link = None
@@ -4785,6 +5538,10 @@ class ViewerApp(App[None]):
             self.push_screen(KeybindingsModal())
         elif choice == "embed":
             self._embed_pdf_annotations_from_menu()
+        elif choice == "reload":
+            self.action_reload_files()
+        elif choice == "rebind":
+            self._open_source_rebind()
         else:
             self._refresh_status()
 
@@ -4797,6 +5554,10 @@ class ViewerApp(App[None]):
 
         if result is None:
             self._refresh_status()
+            return
+        if not self._require_confirmed_source_binding(
+            "edit annotations"
+        ):
             return
         if self._dirty_panes() or link not in self.annotation_links:
             self.notify(
@@ -4816,12 +5577,11 @@ class ViewerApp(App[None]):
                 annotation_type=annotation_type,
                 note=note,
             )
-            saved = self.annotation_store.write(updated)
-        except (AnnotationFileError, ValueError) as error:
+        except ValueError as error:
             self.notify(str(error), severity="error", timeout=5)
             return
 
-        self._replace_annotation_document(saved)
+        self._replace_annotation_document(updated, mark_saved=False)
         edited_link = next(
             (
                 candidate
@@ -4843,17 +5603,17 @@ class ViewerApp(App[None]):
             annotator.focus()
         else:
             viewer.focus()
-        self._refresh_status()
-        self._refresh_pdf_copy_after_annotation_save()
-        self.notify(
-            f"Updated {annotation_type.value} annotation"
-            + (
-                " · hidden by the current filter"
-                if edited_link is not None and edited_link not in visible
-                else ""
-            ),
-            timeout=2.5,
-        )
+        self._request_save("save")
+        if "annotations" not in self._dirty_panes():
+            self.notify(
+                f"Updated {annotation_type.value} annotation"
+                + (
+                    " · hidden by the current filter"
+                    if edited_link is not None and edited_link not in visible
+                    else ""
+                ),
+                timeout=2.5,
+            )
 
     def _finish_annotation_filter(self, choice: Optional[str]) -> None:
         """Apply a non-destructive type projection to the annotation pane."""
@@ -4889,6 +5649,10 @@ class ViewerApp(App[None]):
         if not confirmed or link is None:
             self._refresh_status()
             return
+        if not self._require_confirmed_source_binding(
+            "delete annotations"
+        ):
+            return
         if self._dirty_panes() or link not in self.annotation_links:
             self.notify(
                 "Documents changed before deletion; reopen the menu",
@@ -4905,24 +5669,13 @@ class ViewerApp(App[None]):
                 self.query_one("#annotator", AnnotationTextArea).canonical_text,
                 link,
             )
-            saved = self.annotation_store.write(updated)
-        except (AnnotationFileError, ValueError) as error:
+        except ValueError as error:
             self.notify(str(error), severity="error", timeout=5)
             return
 
-        self.annotation_text = saved
-        self._saved_annotation_text = saved
-        self.annotation_links = parse_annotation_links(saved)
-        self.annotation_ranges = tuple(
-            annotation_link.source_range
-            for annotation_link in self.annotation_links
-        )
+        self._replace_annotation_document(updated, mark_saved=False)
         annotator = self.query_one("#annotator", AnnotationTextArea)
         viewer = self.query_one("#viewer", VimTextArea)
-        annotator.load_annotation_text(saved)
-        annotator.set_annotation_links(self.annotation_links)
-        viewer.set_annotation_ranges(self.annotation_ranges)
-        self._set_search_match("annotator", None)
 
         if self.annotation_links:
             destination = self.annotation_links[
@@ -4959,16 +5712,20 @@ class ViewerApp(App[None]):
                 else viewer.focus()
             )
 
-        self._refresh_status()
-        self._refresh_pdf_copy_after_annotation_save()
-        self.notify(
-            f"Deleted {deleted_label}",
-            timeout=2.5,
-        )
+        self._request_save("save")
+        if "annotations" not in self._dirty_panes():
+            self.notify(
+                f"Deleted {deleted_label}",
+                timeout=2.5,
+            )
 
     def _embed_pdf_annotations_from_menu(self) -> None:
         """Manually synchronize saved records into the source PDF."""
 
+        if not self._require_confirmed_source_binding(
+            "synchronize PDF annotations"
+        ):
+            return
         if self.source.source_kind != "pdf":
             self.notify(
                 "PDF embedding is available only for PDF sources",
@@ -4981,6 +5738,22 @@ class ViewerApp(App[None]):
                 "Save or discard text edits before embedding annotations",
                 severity="warning",
                 timeout=3,
+            )
+            return
+        try:
+            states = self._tracked_file_states()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+        if any(state.disk_changed for state in states):
+            self._pending_save_intent = None
+            self._open_external_change_prompt(
+                tuple(
+                    state
+                    for state in states
+                    if state.change_state is not BufferChangeState.UNCHANGED
+                ),
+                manual_reload=False,
             )
             return
         if not self.annotation_store.path.exists():
@@ -5159,6 +5932,13 @@ class ViewerApp(App[None]):
         modified_info = (
             f"  |  MODIFIED: {', '.join(dirty_panes)}" if dirty_panes else ""
         )
+        binding_info = (
+            "  |  REBIND REQUIRED: m P"
+            if self._source_rebind_required
+            else "  |  INVALID SOURCE BINDING"
+            if self._source_binding_error is not None
+            else ""
+        )
         wrap_info = "wrap" if target.soft_wrap else "no wrap"
         filter_info = (
             self.annotation_type_filter.value.upper()
@@ -5168,7 +5948,7 @@ class ViewerApp(App[None]):
         self.query_one("#status", Static).update(
             f"{mode}  |  ALIGN {self.sync_mode.value.upper()}  |  "
             f"FILTER {filter_info}  |  Ln {row + 1}, Col {column + 1}  |  {wrap_info}"
-            f"{command_info}{selection_info}{modified_info}"
+            f"{command_info}{selection_info}{modified_info}{binding_info}"
         )
 
     def _focused_search_target(self) -> Optional[TextArea]:
@@ -5569,15 +6349,18 @@ class ViewerApp(App[None]):
         )
         _position_cursor_line(annotator, "top")
 
-    def _replace_annotation_document(self, saved: str) -> None:
-        """Load one externally reconciled sidecar into the live annotation pane."""
+    def _replace_annotation_document(
+        self, saved: str, *, mark_saved: bool = True
+    ) -> None:
+        """Load one sidecar document into the live annotation pane."""
 
         annotator = self.query_one("#annotator", AnnotationTextArea)
         viewer = self.query_one("#viewer", VimTextArea)
         full_cursor = annotator._full_cursor_location()
         viewport_position = annotator._cursor_viewport_position()
         self.annotation_text = saved
-        self._saved_annotation_text = saved
+        if mark_saved:
+            self._saved_annotation_text = saved
         self.annotation_links = parse_annotation_links(saved)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
@@ -5660,6 +6443,11 @@ class ViewerApp(App[None]):
         if refreshed != annotator.canonical_text:
             self._replace_annotation_document(refreshed)
         self._initial_pdf_sync_error = None
+        try:
+            self._refresh_disk_baselines()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return True
         self._refresh_titlebar()
         return False
 
@@ -5766,6 +6554,11 @@ class ViewerApp(App[None]):
             viewer.clear_jump_history()
             self._rebuild_source_line_starts()
         self._replace_annotation_document(refreshed_annotations)
+        try:
+            self._refresh_disk_baselines()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
         self._pending_pdf_conflict_report = None
         self._pending_pdf_conflict_resolutions = ()
         self._initial_pdf_sync_error = None
@@ -5793,6 +6586,10 @@ class ViewerApp(App[None]):
         """Run a read-only scan and open review when stale records exist."""
 
         self._cancel_focused_vim_command()
+        if not self._require_confirmed_source_binding(
+            "scan or apply annotation rematches"
+        ):
+            return
         if self.demo_case is not None and not self._demo_reset_complete:
             self.push_screen(
                 DemoResetModal(self.demo_case),
@@ -5875,6 +6672,11 @@ class ViewerApp(App[None]):
         self._saved_source = saved_source
         self.annotation_text = saved_annotations
         self._saved_annotation_text = saved_annotations
+        try:
+            self._refresh_disk_baselines()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
         self.annotation_links = parse_annotation_links(saved_annotations)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
@@ -5987,9 +6789,32 @@ class ViewerApp(App[None]):
             return
         try:
             disk_source = load_source_file(self.source.path)
-            disk_sidecar = self.annotation_store.read_text()
+            (
+                disk_sidecar,
+                disk_sidecar_fingerprint,
+            ) = self.annotation_store.read_snapshot()
         except (TextFileError, AnnotationFileError) as error:
             self.notify(str(error), severity="error", timeout=5)
+            return
+        try:
+            disk_source_fingerprint = (
+                disk_source.disk_fingerprint
+                or fingerprint_path(disk_source.path)
+            )
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
+        if (
+            disk_source_fingerprint != self._source_disk_fingerprint
+            or disk_sidecar_fingerprint
+            != self._annotation_disk_fingerprint
+        ):
+            self.notify(
+                "A file changed on disk after it was loaded; reload and run R "
+                "again. No file was overwritten.",
+                severity="warning",
+                timeout=6,
+            )
             return
         if (
             text_sha256(disk_source.text) != report.source_sha256
@@ -6016,6 +6841,7 @@ class ViewerApp(App[None]):
             saved, backup_path = self.annotation_store.transactional_write(
                 updated,
                 backup_label=backup_label,
+                expected_fingerprint=disk_sidecar_fingerprint,
                 validate=lambda written: validate_applied_rematches(
                     disk_sidecar,
                     written,
@@ -6024,12 +6850,25 @@ class ViewerApp(App[None]):
                     pdf_document=disk_source.pdf_document,
                 ),
             )
-        except (AnnotationFileError, ValueError) as error:
+        except (
+            AnnotationFileError,
+            ConcurrentFileChangeError,
+            DiskFingerprintError,
+            ValueError,
+        ) as error:
             self.notify(str(error), severity="error", timeout=6)
             return
 
         self.annotation_text = saved
         self._saved_annotation_text = saved
+        try:
+            self._annotation_disk_fingerprint = fingerprint_bytes(
+                saved.encode("utf-8")
+            )
+            self._source_disk_fingerprint = disk_source_fingerprint
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
         self.annotation_links = parse_annotation_links(saved)
         self.annotation_ranges = tuple(
             link.source_range for link in self.annotation_links
@@ -6147,15 +6986,288 @@ class ViewerApp(App[None]):
         """Persist dirty source and annotation buffers without quitting."""
 
         self._cancel_focused_vim_command()
-        dirty_panes = self._dirty_panes()
-        if not dirty_panes:
-            self.notify("No changes to save", timeout=1.5)
+        self._request_save("save")
+
+    def _validate_dirty_annotations(self, dirty_panes: tuple[str, ...]) -> bool:
+        if "annotations" not in dirty_panes:
+            return True
+        if self._annotation_load_error is not None:
+            self.notify(
+                "The annotation file did not load safely and cannot be "
+                "overwritten. Fix it externally or reload it first.",
+                severity="error",
+                timeout=6,
+            )
+            return False
+        annotation_text = self.query_one(
+            "#annotator", AnnotationTextArea
+        ).canonical_text
+        try:
+            validate_annotation_document(annotation_text)
+        except AnnotationDocumentValidationError as error:
+            self.notify(str(error), severity="error", timeout=7)
+            return False
+        return True
+
+    def _request_save(self, intent: str) -> None:
+        """Validate, preflight disk state, then save or open conflict review."""
+
+        if not self._require_confirmed_source_binding("save changes"):
             return
-        if self._save_dirty_changes():
+        dirty_panes = self._dirty_panes()
+        try:
+            states = self._tracked_file_states()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+
+        external = tuple(state for state in states if state.disk_changed)
+        if external:
+            relevant = tuple(
+                state
+                for state in states
+                if state.change_state is not BufferChangeState.UNCHANGED
+            )
+            self._pending_save_intent = intent
+            self._open_external_change_prompt(relevant, manual_reload=False)
+            return
+
+        if not self._validate_dirty_annotations(dirty_panes):
+            return
+
+        if not dirty_panes:
+            if intent == "quit":
+                self._complete_quit()
+            else:
+                self.notify("No changes to save", timeout=1.5)
+            return
+
+        try:
+            saved = self._save_dirty_changes()
+        except (ConcurrentFileChangeError, DiskFingerprintError):
+            # A file changed in the narrow interval after preflight. Re-run
+            # classification and present the same recoverable conflict flow.
+            self._pending_save_intent = intent
+            try:
+                raced_states = self._tracked_file_states()
+            except DiskFingerprintError as error:
+                self.notify(str(error), severity="error", timeout=6)
+                return
+            self._open_external_change_prompt(
+                tuple(
+                    state
+                    for state in raced_states
+                    if state.change_state is not BufferChangeState.UNCHANGED
+                ),
+                manual_reload=False,
+            )
+            return
+        if not saved:
+            return
+        self._pending_save_intent = None
+        if intent == "quit":
+            self._complete_quit()
+        else:
             self.notify(
                 f"Saved {', '.join(dirty_panes)}",
                 timeout=2,
             )
+
+    def _open_external_change_prompt(
+        self,
+        states: tuple[TrackedFileState, ...],
+        *,
+        manual_reload: bool,
+    ) -> None:
+        self._pending_external_states = states
+        self._pending_external_manual_reload = manual_reload
+        self.push_screen(
+            ExternalFileChangeModal(
+                states,
+                manual_reload=manual_reload,
+            ),
+            callback=self._finish_external_change_resolution,
+        )
+
+    def action_reload_files(self) -> None:
+        """Reload both tracked files, protecting any unsaved buffers first."""
+
+        self._cancel_focused_vim_command()
+        try:
+            states = self._tracked_file_states()
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=6)
+            return
+        if any(state.memory_changed for state in states):
+            relevant = tuple(
+                state
+                for state in states
+                if state.change_state is not BufferChangeState.UNCHANGED
+            )
+            self._pending_save_intent = None
+            self._open_external_change_prompt(relevant, manual_reload=True)
+            return
+        self.call_next(self._reload_all_files)
+
+    async def _reload_all_files(self) -> None:
+        try:
+            payload = await self._run_with_processing(
+                "Reloading source and annotations…",
+                lambda: self._read_reload_payload(("source", "annotations")),
+            )
+        except (
+            AnnotationDocumentValidationError,
+            AnnotationFileError,
+            TextFileError,
+            DiskFingerprintError,
+        ) as error:
+            self.notify(str(error), severity="error", timeout=7)
+            return
+        self._apply_reload_payload(payload)
+        self.notify("Reloaded source and annotations from disk", timeout=2.5)
+
+    def _read_reload_payload(self, panes: tuple[str, ...]) -> ReloadPayload:
+        source = (
+            load_source_file(self.source.path)
+            if "source" in panes
+            else None
+        )
+        source_fingerprint = (
+            source.disk_fingerprint or fingerprint_path(source.path)
+            if source is not None
+            else None
+        )
+        annotation_text: Optional[str] = None
+        annotation_fingerprint: Optional[DiskFingerprint] = None
+        if "annotations" in panes:
+            (
+                annotation_text,
+                annotation_fingerprint,
+            ) = self.annotation_store.read_snapshot()
+            validate_annotation_document(annotation_text)
+        return ReloadPayload(
+            source=source,
+            source_fingerprint=source_fingerprint,
+            annotation_text=annotation_text,
+            annotation_fingerprint=annotation_fingerprint,
+        )
+
+    def _apply_reload_payload(self, payload: ReloadPayload) -> None:
+        viewer = self.query_one("#viewer", VimTextArea)
+        annotator = self.query_one("#annotator", AnnotationTextArea)
+        focus_id = "annotator" if annotator.has_focus else "viewer"
+        source_cursor = viewer.cursor_location
+
+        if payload.source is not None:
+            viewer.leave_edit_mode()
+            self.source = payload.source
+            self._saved_source = payload.source
+            assert payload.source_fingerprint is not None
+            self._source_disk_fingerprint = payload.source_fingerprint
+            viewer.load_text(payload.source.text)
+            source_lines = payload.source.text.split("\n")
+            row = max(0, min(source_cursor[0], len(source_lines) - 1))
+            viewer.move_cursor(
+                (row, min(source_cursor[1], len(source_lines[row])))
+            )
+            self._rebuild_source_line_starts()
+
+        if payload.annotation_text is not None:
+            annotator.leave_edit_mode()
+            self._replace_annotation_document(payload.annotation_text)
+            assert payload.annotation_fingerprint is not None
+            self._annotation_disk_fingerprint = payload.annotation_fingerprint
+            self._annotation_load_error = None
+
+        self._refresh_source_binding()
+
+        viewer.set_annotation_ranges(self.annotation_ranges)
+        self._set_search_match("viewer", None)
+        self._set_search_match("annotator", None)
+        self._refresh_titlebar()
+        (annotator if focus_id == "annotator" else viewer).focus()
+        self._refresh_status()
+        if self._source_rebind_required:
+            self.call_after_refresh(self._open_source_rebind)
+        elif self._source_binding_error is not None:
+            self.notify(
+                "Invalid annotation source binding: "
+                + self._source_binding_error,
+                severity="error",
+                timeout=6,
+            )
+
+    async def _finish_external_change_resolution(
+        self, choice: Optional[str]
+    ) -> None:
+        states = self._pending_external_states
+        manual_reload = self._pending_external_manual_reload
+        save_intent = self._pending_save_intent
+        self._pending_external_states = ()
+        self._pending_external_manual_reload = False
+
+        if choice is None:
+            self._pending_save_intent = None
+            self._refresh_status()
+            return
+
+        panes_to_reload = (
+            ("source", "annotations")
+            if manual_reload
+            else tuple(state.pane for state in states if state.disk_changed)
+        )
+        copy_inputs = tuple(
+            (state.path, self._buffer_text_for_pane(state.pane))
+            for state in states
+            if state.memory_changed
+            and (manual_reload or state.disk_changed)
+        )
+
+        def preserve_and_reload() -> tuple[tuple[Path, ...], ReloadPayload]:
+            copies = (
+                tuple(
+                    write_conflict_copy(path, text)
+                    for path, text in copy_inputs
+                )
+                if choice == "copy"
+                else ()
+            )
+            return copies, self._read_reload_payload(panes_to_reload)
+
+        try:
+            copies, payload = await self._run_with_processing(
+                (
+                    "Preserving conflict copies and reloading…"
+                    if choice == "copy"
+                    else "Reloading changed files…"
+                ),
+                preserve_and_reload,
+            )
+        except (
+            AnnotationDocumentValidationError,
+            AnnotationFileError,
+            TextFileError,
+            DiskFingerprintError,
+        ) as error:
+            self._pending_save_intent = None
+            self.notify(str(error), severity="error", timeout=7)
+            return
+
+        self._apply_reload_payload(payload)
+        copy_message = (
+            " Conflict copies: "
+            + ", ".join(path.name for path in copies)
+            + "."
+            if copies
+            else ""
+        )
+        self.notify(
+            "Reloaded disk changes." + copy_message,
+            timeout=6 if copies else 2.5,
+        )
+        self._pending_save_intent = None
+        if save_intent is not None:
+            self._request_save(save_intent)
 
     def _jump_through_history(self, *, forward: bool) -> None:
         """Move through only the focused pane's independent jumplist."""
@@ -6206,8 +7318,7 @@ class ViewerApp(App[None]):
         if choice == "discard":
             self._complete_quit()
             return
-        if self._save_dirty_changes():
-            self._complete_quit()
+        self._request_save("quit")
 
     def _complete_quit(self) -> None:
         """Capture resumable state only after the quit decision is complete."""
@@ -6251,6 +7362,16 @@ class ViewerApp(App[None]):
             output_path,
         )
         if receipt is not None:
+            try:
+                self._source_disk_fingerprint = fingerprint_path(
+                    current_source.path
+                )
+                self._annotation_disk_fingerprint = fingerprint_path(
+                    self.annotation_store.path
+                )
+            except DiskFingerprintError as error:
+                self.notify(str(error), severity="error", timeout=5)
+                return
             self.notify(
                 f"PDF and sidecar already synchronized: {output_path.name}",
                 timeout=2,
@@ -6279,7 +7400,10 @@ class ViewerApp(App[None]):
 
         try:
             refreshed_source = load_source_file(current_source.path)
-            refreshed_annotations = self.annotation_store.read_text()
+            (
+                refreshed_annotations,
+                refreshed_annotation_fingerprint,
+            ) = self.annotation_store.read_snapshot()
         except (TextFileError, AnnotationFileError) as error:
             self.notify(
                 "PDF was synchronized, but the refreshed pair could not be "
@@ -6291,6 +7415,15 @@ class ViewerApp(App[None]):
 
         self.source = refreshed_source
         self._saved_source = refreshed_source
+        try:
+            self._source_disk_fingerprint = (
+                refreshed_source.disk_fingerprint
+                or fingerprint_path(refreshed_source.path)
+            )
+        except DiskFingerprintError as error:
+            self.notify(str(error), severity="error", timeout=5)
+            return
+        self._annotation_disk_fingerprint = refreshed_annotation_fingerprint
         if refreshed_annotations != self._saved_annotation_text:
             annotator = self.query_one("#annotator", AnnotationTextArea)
             viewer = self.query_one("#viewer", VimTextArea)
@@ -6325,27 +7458,55 @@ class ViewerApp(App[None]):
 
         if viewer.text != self._saved_source.text:
             try:
-                saved_source = self._source_writer(
-                    self._saved_source, viewer.text
-                )
+                if self._source_writer is save_text_file:
+                    saved_source = save_text_file(
+                        self._saved_source,
+                        viewer.text,
+                        expected_fingerprint=self._source_disk_fingerprint,
+                    )
+                else:
+                    if (
+                        fingerprint_path(self.source.path)
+                        != self._source_disk_fingerprint
+                    ):
+                        raise ConcurrentFileChangeError(
+                            "source file changed on disk after it was loaded: "
+                            f"{self.source.path}"
+                        )
+                    saved_source = self._source_writer(
+                        self._saved_source, viewer.text
+                    )
+            except (ConcurrentFileChangeError, DiskFingerprintError):
+                raise
             except TextFileError as error:
                 self.notify(str(error), severity="error", timeout=5)
                 return False
             self._saved_source = saved_source
             self.source = saved_source
+            self._source_disk_fingerprint = (
+                saved_source.disk_fingerprint
+                or fingerprint_path(saved_source.path)
+            )
             self._rebuild_source_line_starts()
             self._refresh_titlebar()
 
         if annotator.canonical_text != self._saved_annotation_text:
             try:
                 saved_annotations = self.annotation_store.write(
-                    annotator.canonical_text
+                    annotator.canonical_text,
+                    expected_fingerprint=self._annotation_disk_fingerprint,
                 )
+            except (ConcurrentFileChangeError, DiskFingerprintError):
+                raise
             except AnnotationFileError as error:
                 self.notify(str(error), severity="error", timeout=5)
                 self._refresh_status()
                 return False
             self._saved_annotation_text = saved_annotations
+            self.annotation_text = saved_annotations
+            self._annotation_disk_fingerprint = fingerprint_bytes(
+                saved_annotations.encode("utf-8")
+            )
             self._refresh_pdf_copy_after_annotation_save()
 
         self._refresh_status()
@@ -6463,6 +7624,8 @@ class ViewerApp(App[None]):
         viewer = self.query_one("#viewer", VimTextArea)
         if not viewer.has_focus or viewer.edit_mode:
             return
+        if not self._require_confirmed_source_binding("edit the source"):
+            return
         if not self.source.editable:
             self.notify(
                 "PDF source text is an extracted read-only view; edit the "
@@ -6520,6 +7683,10 @@ class ViewerApp(App[None]):
         event.stop()
         annotator = self.query_one("#annotator", AnnotationTextArea)
         if not annotator.has_focus or annotator.edit_mode:
+            return
+        if not self._require_confirmed_source_binding(
+            "edit annotations"
+        ):
             return
         if self._pane_switch_pending:
             self._clear_pane_switch_prefix()
@@ -6655,6 +7822,8 @@ class ViewerApp(App[None]):
     ) -> None:
         """Prepare a note, highlight, or cursor-position bookmark."""
 
+        if not self._require_confirmed_source_binding("add annotations"):
+            return
         if self._dirty_panes():
             self.notify(
                 "Save or discard text edits before adding an annotation",
@@ -6756,25 +7925,15 @@ class ViewerApp(App[None]):
             source_text=self.source.text,
             pdf_anchor=pdf_anchor,
         )
-        try:
-            updated = self.annotation_store.append(record)
-        except AnnotationFileError as error:
-            self.notify(str(error), severity="error", timeout=4)
-            viewer.focus()
-            return
-
-        self.annotation_text = updated
-        self._saved_annotation_text = updated
-        self.annotation_links = parse_annotation_links(updated)
-        self.annotation_ranges = tuple(
-            link.source_range for link in self.annotation_links
+        updated = self.annotation_store.append_to_text(
+            self.query_one(
+                "#annotator", AnnotationTextArea
+            ).canonical_text,
+            (record,),
         )
+        self._replace_annotation_document(updated, mark_saved=False)
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        annotator.load_annotation_text(updated)
         annotator.set_annotation_type_filter(self.annotation_type_filter)
-        annotator.set_annotation_links(self.annotation_links)
-        self._set_search_match("annotator", None)
-        viewer.set_annotation_ranges(self.annotation_ranges)
         visible_links = self._valid_annotation_links()
         if visible_links and self.annotation_links[-1] in visible_links:
             newest_link = self.annotation_links[-1]
@@ -6785,17 +7944,18 @@ class ViewerApp(App[None]):
             viewer.set_active_annotation_range(None)
         viewer.action_cancel_visual()
         viewer.focus()
-        self._refresh_pdf_copy_after_annotation_save()
-        self.notify(
-            f"Saved {annotation_type.value} for range "
-            f"[{draft.start}, {draft.end})"
-            + (
-                " · hidden by the current filter"
-                if self.annotation_links[-1] not in visible_links
-                else ""
-            ),
-            timeout=2,
-        )
+        self._request_save("save")
+        if "annotations" not in self._dirty_panes():
+            self.notify(
+                f"Saved {annotation_type.value} for range "
+                f"[{draft.start}, {draft.end})"
+                + (
+                    " · hidden by the current filter"
+                    if self.annotation_links[-1] not in visible_links
+                    else ""
+                ),
+                timeout=2,
+            )
 
     @on(VimTextArea.CopyRequested)
     def on_copy_requested(self, event: VimTextArea.CopyRequested) -> None:

@@ -14,6 +14,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Tuple
 
+from .file_safety import (
+    ConcurrentFileChangeError,
+    DiskFingerprint,
+    DiskFingerprintError,
+    fingerprint_bytes,
+    fingerprint_path,
+    require_unchanged,
+)
+
 
 Location = Tuple[int, int]
 PdfRectangle = Tuple[float, float, float, float]
@@ -37,6 +46,19 @@ class AnnotationType(str, Enum):
 
 class AnnotationFileError(RuntimeError):
     """Raised when a sidecar annotation file cannot be read or written."""
+
+
+@dataclass(frozen=True)
+class SourceBinding:
+    """Association declared by a managed sidecar front matter block."""
+
+    managed: bool
+    valid: bool
+    recorded_reference: Optional[str]
+    recorded_path: Optional[Path]
+    current_path: Path
+    matches: bool
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +179,147 @@ class AnnotationRecord:
     pdf_anchor: Optional[PdfAnchor] = None
     pdf_import: Optional[PdfImportMetadata] = None
     pdf_sync: Optional[PdfSyncMetadata] = None
+
+
+def source_reference_for(source_path: Path, sidecar_path: Path) -> str:
+    """Return a portable path relative to the sidecar when possible."""
+
+    source = source_path.expanduser().resolve()
+    sidecar_parent = sidecar_path.expanduser().resolve().parent
+    try:
+        relative = os.path.relpath(source, start=sidecar_parent)
+    except ValueError:
+        # Different Windows drives cannot be represented relatively.
+        return source.as_posix()
+    return Path(relative).as_posix()
+
+
+def _managed_front_matter_lines(
+    annotation_text: str,
+) -> Tuple[list[str], Optional[int]]:
+    """Return physical lines and the managed front matter closing index."""
+
+    lines = annotation_text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return lines, None
+    closing = next(
+        (
+            index
+            for index, line in enumerate(lines[1:101], start=1)
+            if line.strip() == "---"
+        ),
+        None,
+    )
+    if closing is None:
+        return lines, None
+    format_values = [
+        line.partition(":")[2].strip().strip('"\'')
+        for line in lines[1:closing]
+        if line.startswith("format:")
+    ]
+    if format_values != ["pure-text-annotator"]:
+        return lines, None
+    return lines, closing
+
+
+def inspect_source_binding(
+    annotation_text: str,
+    *,
+    sidecar_path: Path,
+    current_source_path: Path,
+) -> SourceBinding:
+    """Inspect a managed sidecar's recorded source without changing it."""
+
+    current = current_source_path.expanduser().resolve()
+    sidecar = sidecar_path.expanduser().resolve()
+    lines, closing = _managed_front_matter_lines(annotation_text)
+    if closing is None:
+        return SourceBinding(
+            managed=False,
+            valid=True,
+            recorded_reference=None,
+            recorded_path=None,
+            current_path=current,
+            matches=True,
+        )
+    source_lines = [
+        line for line in lines[1:closing] if line.startswith("source:")
+    ]
+    if len(source_lines) != 1:
+        return SourceBinding(
+            managed=True,
+            valid=False,
+            recorded_reference=None,
+            recorded_path=None,
+            current_path=current,
+            matches=False,
+            error="managed sidecar must contain exactly one source field",
+        )
+    raw_reference = source_lines[0].partition(":")[2].strip()
+    try:
+        reference = json.loads(raw_reference)
+    except json.JSONDecodeError:
+        reference = None
+    if not isinstance(reference, str) or not reference:
+        return SourceBinding(
+            managed=True,
+            valid=False,
+            recorded_reference=None,
+            recorded_path=None,
+            current_path=current,
+            matches=False,
+            error="managed sidecar source field must be a JSON string",
+        )
+    reference_path = Path(reference.replace("/", os.sep)).expanduser()
+    recorded = (
+        reference_path.resolve()
+        if reference_path.is_absolute()
+        else (sidecar.parent / reference_path).resolve()
+    )
+    return SourceBinding(
+        managed=True,
+        valid=True,
+        recorded_reference=reference,
+        recorded_path=recorded,
+        current_path=current,
+        matches=recorded == current,
+    )
+
+
+def rewrite_source_binding(
+    annotation_text: str,
+    *,
+    sidecar_path: Path,
+    current_source_path: Path,
+) -> str:
+    """Rewrite only the managed front matter's source reference."""
+
+    binding = inspect_source_binding(
+        annotation_text,
+        sidecar_path=sidecar_path,
+        current_source_path=current_source_path,
+    )
+    if not binding.managed:
+        raise ValueError("annotation file has no managed PTA front matter")
+    if not binding.valid:
+        raise ValueError(binding.error or "invalid annotation source binding")
+    lines, closing = _managed_front_matter_lines(annotation_text)
+    assert closing is not None
+    source_indexes = [
+        index
+        for index, line in enumerate(lines[1:closing], start=1)
+        if line.startswith("source:")
+    ]
+    assert len(source_indexes) == 1
+    index = source_indexes[0]
+    old_line = lines[index]
+    content = old_line.rstrip("\r\n")
+    newline = old_line[len(content) :] or "\n"
+    reference = source_reference_for(current_source_path, sidecar_path)
+    lines[index] = (
+        "source: " + json.dumps(reference, ensure_ascii=False) + newline
+    )
+    return "".join(lines)
 
 
 def _pdf_number_list(values: Tuple[float, ...]) -> str:
@@ -765,12 +928,15 @@ class AnnotationStore:
         )
 
     def initial_text(self) -> str:
-        source_name = json.dumps(self.source_path.name, ensure_ascii=False)
+        source_reference = json.dumps(
+            source_reference_for(self.source_path, self.path),
+            ensure_ascii=False,
+        )
         return (
             "---\n"
             "format: pure-text-annotator\n"
             "version: 1\n"
-            f"source: {source_name}\n"
+            f"source: {source_reference}\n"
             "range_unit: unicode-code-point\n"
             "range_convention: zero-based-half-open\n"
             "---\n\n"
@@ -780,8 +946,14 @@ class AnnotationStore:
     def read_text(self) -> str:
         """Return the exact sidecar text or the initial unsaved document."""
 
+        text, _fingerprint = self.read_snapshot()
+        return text
+
+    def read_snapshot(self) -> Tuple[str, DiskFingerprint]:
+        """Read text and exact fingerprint from the same byte snapshot."""
+
         if not self.path.exists():
-            return self.initial_text()
+            return self.initial_text(), DiskFingerprint.missing()
         if not self.path.is_file():
             raise AnnotationFileError(f"annotation path is not a file: {self.path}")
         try:
@@ -795,7 +967,7 @@ class AnnotationStore:
                 f"annotation file appears to be binary: {self.path}"
             )
         try:
-            return raw.decode("utf-8-sig")
+            return raw.decode("utf-8-sig"), fingerprint_bytes(raw)
         except UnicodeDecodeError as error:
             raise AnnotationFileError(
                 f"annotation file is not valid UTF-8: {self.path}"
@@ -884,10 +1056,17 @@ class AnnotationStore:
             return text + "\n"
         return text + "\n\n"
 
-    def append(self, record: AnnotationRecord) -> str:
+    def append(
+        self,
+        record: AnnotationRecord,
+        *,
+        expected_fingerprint: Optional[DiskFingerprint] = None,
+    ) -> str:
         """Append a record atomically and return the complete saved document."""
 
-        return self.append_many((record,))
+        return self.append_many(
+            (record,), expected_fingerprint=expected_fingerprint
+        )
 
     def append_many(
         self,
@@ -895,6 +1074,7 @@ class AnnotationStore:
         *,
         expected_text: Optional[str] = None,
         base_text: Optional[str] = None,
+        expected_fingerprint: Optional[DiskFingerprint] = None,
     ) -> str:
         """Append several records with one all-or-nothing sidecar replacement."""
 
@@ -906,23 +1086,39 @@ class AnnotationStore:
         base = current if base_text is None else base_text
         if not records and base == current:
             return current
-        first_ordinal = base.count(self.MARKER) + 1
+        updated = self.append_to_text(base, records)
+        self._atomic_write(
+            updated, expected_fingerprint=expected_fingerprint
+        )
+        return updated
+
+    def append_to_text(
+        self,
+        base_text: str,
+        records: Sequence[AnnotationRecord],
+    ) -> str:
+        """Render appended records without touching the disk."""
+
+        if not records:
+            return base_text
+        first_ordinal = base_text.count(self.MARKER) + 1
         rendered = "\n\n".join(
             self._render_record(record, first_ordinal + offset).rstrip("\n")
             for offset, record in enumerate(records)
         )
-        updated = (
-            self._with_blank_line(base) + rendered + "\n"
-            if records
-            else base
-        )
-        self._atomic_write(updated)
-        return updated
+        return self._with_blank_line(base_text) + rendered + "\n"
 
-    def write(self, text: str) -> str:
+    def write(
+        self,
+        text: str,
+        *,
+        expected_fingerprint: Optional[DiskFingerprint] = None,
+    ) -> str:
         """Atomically replace the complete annotation document."""
 
-        self._atomic_write(text)
+        self._atomic_write(
+            text, expected_fingerprint=expected_fingerprint
+        )
         return text
 
     def transactional_write(
@@ -931,9 +1127,16 @@ class AnnotationStore:
         *,
         backup_label: str,
         validate: Callable[[str], None],
+        expected_fingerprint: Optional[DiskFingerprint] = None,
     ) -> Tuple[str, Optional[Path]]:
         """Write, validate, and roll back while retaining an exact backup."""
 
+        if expected_fingerprint is not None:
+            require_unchanged(
+                self.path,
+                expected_fingerprint,
+                label="annotation file",
+            )
         original_exists = self.path.exists()
         original = self.path.read_bytes() if original_exists else b""
         backup_path: Optional[Path] = None
@@ -955,11 +1158,33 @@ class AnnotationStore:
                 ) from error
             backup_path = candidate
 
+        written_fingerprint: Optional[DiskFingerprint] = None
         try:
-            self._atomic_write(text)
+            self._atomic_write(
+                text, expected_fingerprint=expected_fingerprint
+            )
+            written_fingerprint = fingerprint_path(self.path)
             saved = self.read_text()
             validate(saved)
+        except (ConcurrentFileChangeError, DiskFingerprintError):
+            raise
         except Exception as error:
+            if written_fingerprint is not None:
+                try:
+                    require_unchanged(
+                        self.path,
+                        written_fingerprint,
+                        label="annotation file",
+                    )
+                except (
+                    ConcurrentFileChangeError,
+                    DiskFingerprintError,
+                ) as concurrent_error:
+                    raise AnnotationFileError(
+                        "rematch validation failed, but the annotation file "
+                        "changed again on disk; the newer disk bytes were not "
+                        "overwritten"
+                    ) from concurrent_error
             try:
                 if original_exists:
                     self._atomic_write_bytes(self.path, original)
@@ -1004,10 +1229,21 @@ class AnnotationStore:
                     pass
             raise
 
-    def _atomic_write(self, text: str) -> None:
+    def _atomic_write(
+        self,
+        text: str,
+        *,
+        expected_fingerprint: Optional[DiskFingerprint] = None,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Optional[Path] = None
         try:
+            if expected_fingerprint is not None:
+                require_unchanged(
+                    self.path,
+                    expected_fingerprint,
+                    label="annotation file",
+                )
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -1021,7 +1257,21 @@ class AnnotationStore:
                 temporary.write(text)
                 temporary.flush()
                 os.fsync(temporary.fileno())
+            if expected_fingerprint is not None:
+                require_unchanged(
+                    self.path,
+                    expected_fingerprint,
+                    label="annotation file",
+                )
             os.replace(temporary_path, self.path)
+            temporary_path = None
+        except (ConcurrentFileChangeError, DiskFingerprintError):
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         except OSError as error:
             if temporary_path is not None:
                 try:

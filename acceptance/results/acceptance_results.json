@@ -1,0 +1,4442 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "measured_at": "2026-11-14T05:00:10+08:00",
+    "pta_version": "0.11.0",
+    "code_sha256": "61f63447abb91d22a4faca869f704c30ff3872b8076af9bbd940efc324fc2927",
+    "git_commit": "e3d2b1eb9a8e553c505cbf1b1de09f4798f5f68b",
+    "git_worktree_dirty": true,
+    "operating_system": "macOS-15.5-arm64-arm-64bit",
+    "machine": "arm64",
+    "processor": "arm",
+    "cpu_count": 10,
+    "hardware_overview": "Hardware:\n\n    Hardware Overview:\n\n      Model Name: Mac mini\n      Model Identifier: Mac16,10\n      Model Number: MU9D3CH/A\n      Chip: Apple M4\n      Total Number of Cores: 10 (4 performance and 6 efficiency)\n      Memory: 16 GB\n      System Firmware Version: 11881.121.1\n      OS Loader Version: 11881.121.1",
+    "python": "3.9.6 (default, Apr 30 2025, 02:07:17)  [Clang 17.0.0 (clang-1700.0.13.5)]",
+    "dependencies": {
+      "textual": "8.2.8",
+      "pdfplumber": "0.11.8",
+      "pypdf": "6.21.4",
+      "PyYAML": "6.0.3",
+      "platformdirs": "4.4.0",
+      "pytest": "8.4.2"
+    }
+  },
+  "rematch_acceptance": {
+    "seed": 20261114,
+    "case_count": 120,
+    "category_counts": {
+      "ambiguous_duplicate": 10,
+      "deletion_before_target": 15,
+      "duplicate_with_context": 15,
+      "file_migration": 10,
+      "local_modification": 20,
+      "prefix_insertion": 20,
+      "quotation_deleted": 10,
+      "unchanged": 20
+    },
+    "annotation_type_counts": {
+      "bookmark": 40,
+      "highlight": 40,
+      "note": 40
+    },
+    "strategy_outcomes": {
+      "offset_only": {
+        "automatic_correct": 30,
+        "automatic_wrong": 65,
+        "invalid_recognized": 10,
+        "unexpected_unresolved": 15
+      },
+      "quote_only": {
+        "automatic_correct": 65,
+        "invalid_recognized": 10,
+        "pending_confirmation": 25,
+        "unexpected_unresolved": 20
+      },
+      "combined_anchor": {
+        "automatic_correct": 80,
+        "invalid_recognized": 10,
+        "pending_confirmation": 30
+      }
+    },
+    "unique_unchanged_quote": {
+      "case_count": 65,
+      "automatic_correct": 65,
+      "automatic_wrong": 0,
+      "pending_confirmation": 0,
+      "unexpected_unresolved": 0,
+      "correct_rate_percent": 100.0,
+      "target_percent": 95.0,
+      "passes": true
+    },
+    "combined_wrong_case_ids": [],
+    "details": [
+      {
+        "case_id": "RM-001",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-002",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          55,
+          129
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            129
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            129
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            129
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-003",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          132
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-004",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-005",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          133
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            133
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            133
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-006",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          132
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-007",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          56,
+          130
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            130
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            130
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            130
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-008",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          55,
+          131
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            131
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            131
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-009",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          56,
+          136
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            136
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            136
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-010",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          59,
+          133
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            133
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            133
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-011",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          132
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            132
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-012",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          133
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            133
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            133
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-013",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          131
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-014",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          55,
+          130
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            130
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            130
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            55,
+            130
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-015",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          61,
+          140
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-016",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          62,
+          135
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            135
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            135
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-017",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          131
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            131
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-018",
+        "category": "unchanged",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          61,
+          140
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            140
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-019",
+        "category": "unchanged",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          61,
+          138
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            138
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            61,
+            138
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-020",
+        "category": "unchanged",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-021",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          95,
+          170
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            60,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            95,
+            170
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            95,
+            170
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-022",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          91,
+          167
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            56,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            167
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            167
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-023",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          91,
+          166
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            56,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            166
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            166
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-024",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          92,
+          173
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            173
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            173
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-025",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          92,
+          172
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            172
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            172
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-026",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          93,
+          171
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            171
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            171
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-027",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          94,
+          171
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            59,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            94,
+            171
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            94,
+            171
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-028",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          91,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            56,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            168
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-029",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          91,
+          167
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            56,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            167
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            91,
+            167
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-030",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          92,
+          169
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            169
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            169
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-031",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          96,
+          173
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            61,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            96,
+            173
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            96,
+            173
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-032",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          97,
+          173
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            62,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            97,
+            173
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            97,
+            173
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-033",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          95,
+          173
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            60,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            95,
+            173
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            95,
+            173
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-034",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          90,
+          170
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            55,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            90,
+            170
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            90,
+            170
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-035",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          93,
+          170
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            170
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            170
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-036",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          97,
+          173
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            62,
+            138
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            97,
+            173
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            97,
+            173
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-037",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          93,
+          171
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            171
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            93,
+            171
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-038",
+        "category": "prefix_insertion",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          96,
+          171
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            61,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            96,
+            171
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            96,
+            171
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-039",
+        "category": "prefix_insertion",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          92,
+          172
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            172
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            172
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-040",
+        "category": "prefix_insertion",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          92,
+          167
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            167
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            92,
+            167
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-041",
+        "category": "deletion_before_target",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          77
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-042",
+        "category": "deletion_before_target",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          76
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-043",
+        "category": "deletion_before_target",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          73
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-044",
+        "category": "deletion_before_target",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          75
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            75
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            75
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-045",
+        "category": "deletion_before_target",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          76
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-046",
+        "category": "deletion_before_target",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          78
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            78
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            78
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-047",
+        "category": "deletion_before_target",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          76
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-048",
+        "category": "deletion_before_target",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          74
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            74
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            74
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-049",
+        "category": "deletion_before_target",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          73
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-050",
+        "category": "deletion_before_target",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          76
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            76
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-051",
+        "category": "deletion_before_target",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          80
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            80
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            80
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-052",
+        "category": "deletion_before_target",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          74
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            74
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            74
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-053",
+        "category": "deletion_before_target",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          77
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-054",
+        "category": "deletion_before_target",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          77
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            77
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-055",
+        "category": "deletion_before_target",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          0,
+          73
+        ],
+        "offset_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            0,
+            73
+          ],
+          "status": "Shifted",
+          "confidence": 90,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-056",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          145
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            60,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            60,
+            145
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-057",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          139
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            57,
+            139
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-058",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          141
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            141
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-059",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          145
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            57,
+            145
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-060",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          147
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            60,
+            139
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            60,
+            147
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-061",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          62,
+          144
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            62,
+            136
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            62,
+            144
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-062",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          142
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            57,
+            142
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-063",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          143
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            143
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-064",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          56,
+          139
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            56,
+            131
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            56,
+            139
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-065",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          59,
+          142
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            59,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            59,
+            142
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-066",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          143
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            60,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            60,
+            143
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-067",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          140
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            140
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-068",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          142
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            142
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-069",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          140
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            140
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-070",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          145
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            145
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-071",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          145
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            145
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-072",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          145
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            137
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            57,
+            145
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-073",
+        "category": "local_modification",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          61,
+          149
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            61,
+            141
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            61,
+            149
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-074",
+        "category": "local_modification",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          141
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            57,
+            133
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            57,
+            141
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-075",
+        "category": "local_modification",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          142
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "unexpected_unresolved",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            58,
+            142
+          ],
+          "status": "Ambiguous",
+          "confidence": 85,
+          "method": "fuzzy"
+        }
+      },
+      {
+        "case_id": "RM-076",
+        "category": "duplicate_with_context",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-077",
+        "category": "duplicate_with_context",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-078",
+        "category": "duplicate_with_context",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-079",
+        "category": "duplicate_with_context",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-080",
+        "category": "duplicate_with_context",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-081",
+        "category": "duplicate_with_context",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-082",
+        "category": "duplicate_with_context",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-083",
+        "category": "duplicate_with_context",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-084",
+        "category": "duplicate_with_context",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-085",
+        "category": "duplicate_with_context",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-086",
+        "category": "duplicate_with_context",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-087",
+        "category": "duplicate_with_context",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-088",
+        "category": "duplicate_with_context",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-089",
+        "category": "duplicate_with_context",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-090",
+        "category": "duplicate_with_context",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          128,
+          168
+        ],
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            106,
+            146
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            128,
+            168
+          ],
+          "status": "Shifted",
+          "confidence": 95,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-091",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "note",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-092",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "highlight",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-093",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "bookmark",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-094",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "note",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-095",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "highlight",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-096",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "bookmark",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-097",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "note",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-098",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "highlight",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-099",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "bookmark",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-100",
+        "category": "ambiguous_duplicate",
+        "annotation_type": "note",
+        "expected_state": "ambiguous",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "automatic_wrong",
+          "range": [
+            0,
+            31
+          ]
+        },
+        "quote_only": {
+          "outcome": "pending_confirmation",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "pending_confirmation",
+          "range": [
+            5,
+            36
+          ],
+          "status": "Ambiguous",
+          "confidence": 75,
+          "method": "exact"
+        }
+      },
+      {
+        "case_id": "RM-101",
+        "category": "quotation_deleted",
+        "annotation_type": "highlight",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-102",
+        "category": "quotation_deleted",
+        "annotation_type": "bookmark",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-103",
+        "category": "quotation_deleted",
+        "annotation_type": "note",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-104",
+        "category": "quotation_deleted",
+        "annotation_type": "highlight",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-105",
+        "category": "quotation_deleted",
+        "annotation_type": "bookmark",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-106",
+        "category": "quotation_deleted",
+        "annotation_type": "note",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-107",
+        "category": "quotation_deleted",
+        "annotation_type": "highlight",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-108",
+        "category": "quotation_deleted",
+        "annotation_type": "bookmark",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-109",
+        "category": "quotation_deleted",
+        "annotation_type": "note",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-110",
+        "category": "quotation_deleted",
+        "annotation_type": "highlight",
+        "expected_state": "orphaned",
+        "expected_range": null,
+        "offset_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "quote_only": {
+          "outcome": "invalid_recognized",
+          "range": null
+        },
+        "combined_anchor": {
+          "outcome": "invalid_recognized",
+          "range": null,
+          "status": "Orphaned",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-111",
+        "category": "file_migration",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          135
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            135
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            135
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-112",
+        "category": "file_migration",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          132
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            132
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            132
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-113",
+        "category": "file_migration",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-114",
+        "category": "file_migration",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          58,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            58,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-115",
+        "category": "file_migration",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          62,
+          141
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            141
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            141
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            62,
+            141
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-116",
+        "category": "file_migration",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          59,
+          134
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            134
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            134
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            59,
+            134
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-117",
+        "category": "file_migration",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          60,
+          139
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            139
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            139
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            60,
+            139
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-118",
+        "category": "file_migration",
+        "annotation_type": "note",
+        "expected_state": "range",
+        "expected_range": [
+          57,
+          139
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            139
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            139
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            57,
+            139
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-119",
+        "category": "file_migration",
+        "annotation_type": "highlight",
+        "expected_state": "range",
+        "expected_range": [
+          56,
+          132
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            132
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            132
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            132
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      },
+      {
+        "case_id": "RM-120",
+        "category": "file_migration",
+        "annotation_type": "bookmark",
+        "expected_state": "range",
+        "expected_range": [
+          56,
+          135
+        ],
+        "offset_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            135
+          ]
+        },
+        "quote_only": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            135
+          ]
+        },
+        "combined_anchor": {
+          "outcome": "automatic_correct",
+          "range": [
+            56,
+            135
+          ],
+          "status": "Healthy",
+          "confidence": null,
+          "method": null
+        }
+      }
+    ]
+  },
+  "performance_fixture": {
+    "source_size_bytes": 1000000,
+    "source_sha256": "896eaa81b53cfaec43285ec2a0a16a666f11df7e353a9e5afae058fa9d2698eb",
+    "source_lines": 10000,
+    "line_size_bytes_including_newline": 100,
+    "annotation_count": 1000,
+    "annotation_type_counts": {
+      "bookmark": 333,
+      "highlight": 333,
+      "note": 334
+    },
+    "sidecar_size_bytes": 683176,
+    "sidecar_sha256": "7200facb44c90c2b108bcf95d524669a4d00b2e78e8d4a8271ab20c43d5aa323",
+    "generator_seed": 20261114
+  },
+  "full_rematch": {
+    "runs_ms": [
+      620.414,
+      632.403,
+      627.95
+    ],
+    "summary": {
+      "count": 3,
+      "minimum_ms": 620.414,
+      "median_ms": 627.95,
+      "p95_ms": 632.403,
+      "maximum_ms": 632.403,
+      "threshold_ms": 2000.0,
+      "within_threshold": 3,
+      "within_threshold_percent": 100.0,
+      "passes_95_percent_rule": true
+    },
+    "status_counts": {
+      "Shifted": 1000
+    },
+    "mutation": "one preface insertion shifts all 1000 valid ranges",
+    "note": "reported separately; the 2 s load threshold is not applied"
+  },
+  "ui_performance": {
+    "load_runs_ms": [
+      1003.075,
+      1158.588,
+      1228.439,
+      1272.664,
+      1301.043,
+      1277.343,
+      1340.648,
+      1354.549,
+      1610.084,
+      1801.506
+    ],
+    "load_summary": {
+      "count": 10,
+      "minimum_ms": 1003.075,
+      "median_ms": 1289.193,
+      "p95_ms": 1801.506,
+      "maximum_ms": 1801.506,
+      "threshold_ms": 2000.0,
+      "within_threshold": 10,
+      "within_threshold_percent": 100.0,
+      "passes_95_percent_rule": true
+    },
+    "response_operations": {
+      "operation_runs_ms": {
+        "scroll": [
+          5.302,
+          1.022,
+          2.099,
+          2.004,
+          2.105,
+          2.016,
+          2.08,
+          1.983,
+          2.055,
+          1.975,
+          1.943,
+          24.968,
+          2.369,
+          2.046,
+          2.084,
+          1.98,
+          1.935,
+          1.778,
+          1.756,
+          1.992,
+          2.003,
+          1.998,
+          2.069,
+          1.908,
+          48.559,
+          2.156,
+          1.969,
+          1.927,
+          1.89,
+          1.971,
+          1.969,
+          4.169,
+          2.207,
+          111.017,
+          2.225,
+          2.084,
+          1.933,
+          0.778,
+          0.68,
+          0.646,
+          0.641,
+          0.629,
+          0.629,
+          0.67,
+          0.67,
+          0.662,
+          0.667,
+          0.687,
+          0.629,
+          0.677,
+          0.724,
+          0.702,
+          0.63,
+          0.63,
+          0.668,
+          0.683,
+          0.662,
+          0.649,
+          0.671,
+          0.679,
+          21.253,
+          0.827,
+          0.678,
+          0.679,
+          0.671,
+          0.682,
+          0.652,
+          0.657,
+          0.701,
+          0.654
+        ],
+        "selection": [
+          0.616,
+          0.785,
+          1.915,
+          2.01,
+          2.99,
+          1.934,
+          1.88,
+          2.866,
+          1.805,
+          1.752,
+          2.882,
+          1.902,
+          23.512,
+          3.158,
+          1.901,
+          1.901,
+          2.903,
+          1.83,
+          1.772,
+          2.795,
+          1.8,
+          1.755,
+          2.803,
+          1.947,
+          1.901,
+          23.988,
+          2.021,
+          1.864,
+          2.946,
+          1.878,
+          2.019,
+          2.981,
+          1.805,
+          1.806,
+          2.773,
+          1.84,
+          1.844,
+          2.858,
+          23.274,
+          2.018,
+          2.977,
+          1.946,
+          1.829,
+          3.047,
+          1.813,
+          1.78,
+          2.812,
+          1.764,
+          1.813,
+          2.858,
+          1.983,
+          23.388,
+          3.121,
+          1.856,
+          1.926,
+          2.844,
+          1.854,
+          1.947,
+          5.624,
+          3.383
+        ],
+        "annotation_switch": [
+          5.994,
+          46.37,
+          7.609,
+          6.751,
+          6.175,
+          51.004,
+          5.096,
+          5.241,
+          4.807,
+          51.96,
+          4.715,
+          5.093,
+          4.827,
+          4.645,
+          4.615,
+          4.752,
+          51.678,
+          4.95,
+          4.935,
+          4.95,
+          51.743,
+          4.766,
+          4.716,
+          4.92,
+          4.599,
+          118.034,
+          4.68,
+          4.721,
+          4.88,
+          51.436,
+          4.776,
+          4.99,
+          4.792,
+          51.834,
+          5.037,
+          4.861,
+          4.917,
+          51.539,
+          5.73,
+          5.045,
+          4.803,
+          51.822,
+          4.883,
+          4.939,
+          4.596,
+          51.711,
+          5.065,
+          5.07,
+          4.704,
+          51.032,
+          4.904,
+          4.926,
+          4.717,
+          51.641,
+          4.819,
+          4.865,
+          4.507,
+          71.701,
+          9.393,
+          7.543,
+          129.462,
+          5.029,
+          4.827,
+          5.405,
+          56.033,
+          5.07,
+          5.235,
+          5.081,
+          5.27,
+          5.01
+        ]
+      },
+      "operation_summaries": {
+        "scroll": {
+          "count": 70,
+          "minimum_ms": 0.629,
+          "median_ms": 1.834,
+          "p95_ms": 21.253,
+          "maximum_ms": 111.017,
+          "threshold_ms": 100.0,
+          "within_threshold": 69,
+          "within_threshold_percent": 98.57,
+          "passes_95_percent_rule": true
+        },
+        "selection": {
+          "count": 60,
+          "minimum_ms": 0.616,
+          "median_ms": 1.947,
+          "p95_ms": 23.274,
+          "maximum_ms": 23.988,
+          "threshold_ms": 100.0,
+          "within_threshold": 60,
+          "within_threshold_percent": 100.0,
+          "passes_95_percent_rule": true
+        },
+        "annotation_switch": {
+          "count": 70,
+          "minimum_ms": 4.507,
+          "median_ms": 5.033,
+          "p95_ms": 56.033,
+          "maximum_ms": 129.462,
+          "threshold_ms": 100.0,
+          "within_threshold": 68,
+          "within_threshold_percent": 97.14,
+          "passes_95_percent_rule": true
+        }
+      },
+      "combined_operation_summary": {
+        "count": 200,
+        "minimum_ms": 0.616,
+        "median_ms": 2.297,
+        "p95_ms": 51.678,
+        "maximum_ms": 129.462,
+        "threshold_ms": 100.0,
+        "within_threshold": 197,
+        "within_threshold_percent": 98.5,
+        "passes_95_percent_rule": true
+      },
+      "measurement_boundary": "before Textual Key event dispatch through completion of screen messages queued by that operation; cosmetic animation completion is excluded",
+      "acceptance_metric": true
+    },
+    "full_settle_operations": {
+      "operation_runs_ms": {
+        "scroll": [
+          85.334,
+          66.964,
+          154.479,
+          105.965,
+          107.586,
+          106.612,
+          87.675,
+          108.12,
+          105.732,
+          85.279,
+          152.371,
+          105.84,
+          124.219,
+          84.472,
+          173.893,
+          106.58,
+          86.22,
+          106.706,
+          108.195,
+          117.26,
+          118.812,
+          113.008,
+          86.133,
+          106.214,
+          107.076,
+          87.224,
+          108.695,
+          116.184,
+          186.096,
+          90.188,
+          145.811,
+          85.752,
+          106.225,
+          107.002,
+          86.597,
+          63.332,
+          63.2,
+          64.609,
+          63.36,
+          62.884,
+          62.68,
+          63.306,
+          63.473,
+          63.06,
+          62.73,
+          64.107,
+          63.765,
+          63.074,
+          63.126,
+          61.833,
+          63.5,
+          62.914,
+          63.349,
+          61.839,
+          64.192,
+          63.65,
+          64.011,
+          63.336,
+          63.371,
+          122.683,
+          63.535,
+          63.095,
+          63.078,
+          64.304,
+          63.282,
+          63.332,
+          63.195,
+          62.975,
+          63.74,
+          63.177
+        ],
+        "selection": [
+          103.813,
+          120.893,
+          107.439,
+          105.258,
+          87.219,
+          111.771,
+          104.843,
+          123.085,
+          97.094,
+          105.26,
+          125.731,
+          116.131,
+          104.822,
+          176.825,
+          84.85,
+          84.594,
+          105.395,
+          115.901,
+          103.074,
+          110.611,
+          113.713,
+          104.991,
+          108.494,
+          115.322,
+          105.122,
+          102.3,
+          114.341,
+          158.583,
+          104.688,
+          85.56,
+          84.134,
+          104.978,
+          107.801,
+          91.976,
+          126.009,
+          120.066,
+          107.712,
+          122.732,
+          146.464,
+          105.109,
+          106.246,
+          107.782,
+          89.644,
+          196.264,
+          84.451,
+          83.92,
+          84.68,
+          97.373,
+          84.669,
+          104.484,
+          107.598,
+          105.156,
+          128.285,
+          117.882,
+          89.195,
+          95.905,
+          111.594,
+          105.1,
+          108.189,
+          196.389
+        ],
+        "annotation_switch": [
+          87.886,
+          137.792,
+          117.051,
+          116.72,
+          149.066,
+          131.778,
+          116.067,
+          138.644,
+          193.036,
+          136.705,
+          115.811,
+          137.608,
+          122.236,
+          138.404,
+          188.916,
+          122.421,
+          160.658,
+          132.537,
+          186.589,
+          141.54,
+          122.381,
+          116.623,
+          189.565,
+          140.028,
+          152.539,
+          186.082,
+          132.239,
+          144.846,
+          116.548,
+          187.058,
+          116.629,
+          115.696,
+          162.518,
+          116.468,
+          114.916,
+          115.325,
+          185.604,
+          136.169,
+          115.284,
+          137.651,
+          124.784,
+          137.135,
+          116.502,
+          181.193,
+          135.736,
+          115.774,
+          114.994,
+          136.204,
+          116.327,
+          136.973,
+          181.425,
+          115.269,
+          136.35,
+          115.097,
+          136.927,
+          116.378,
+          136.167,
+          191.549,
+          116.153,
+          135.213,
+          114.572,
+          114.246,
+          150.492,
+          200.961,
+          115.182,
+          115.838,
+          116.186,
+          138.887,
+          116.303,
+          137.258
+        ]
+      },
+      "operation_summaries": {
+        "scroll": {
+          "count": 70,
+          "minimum_ms": 61.833,
+          "median_ms": 75.718,
+          "p95_ms": 152.371,
+          "maximum_ms": 186.096,
+          "threshold_ms": 100.0,
+          "within_threshold": 45,
+          "within_threshold_percent": 64.29,
+          "passes_95_percent_rule": false
+        },
+        "selection": {
+          "count": 60,
+          "minimum_ms": 83.92,
+          "median_ms": 105.327,
+          "p95_ms": 158.583,
+          "maximum_ms": 196.389,
+          "threshold_ms": 100.0,
+          "within_threshold": 15,
+          "within_threshold_percent": 25.0,
+          "passes_95_percent_rule": false
+        },
+        "annotation_switch": {
+          "count": 70,
+          "minimum_ms": 87.886,
+          "median_ms": 135.474,
+          "p95_ms": 189.565,
+          "maximum_ms": 200.961,
+          "threshold_ms": 100.0,
+          "within_threshold": 1,
+          "within_threshold_percent": 1.43,
+          "passes_95_percent_rule": false
+        }
+      },
+      "combined_operation_summary": {
+        "count": 200,
+        "minimum_ms": 61.833,
+        "median_ms": 111.103,
+        "p95_ms": 186.082,
+        "maximum_ms": 200.961,
+        "threshold_ms": 100.0,
+        "within_threshold": 61,
+        "within_threshold_percent": 30.5,
+        "passes_95_percent_rule": false
+      },
+      "no_op_framework_baseline": {
+        "count": 20,
+        "minimum_ms": 42.366,
+        "median_ms": 43.039,
+        "p95_ms": 63.651,
+        "maximum_ms": 64.499,
+        "threshold_ms": 100.0,
+        "within_threshold": 20,
+        "within_threshold_percent": 100.0,
+        "passes_95_percent_rule": true
+      },
+      "measurement_boundary": "before Textual Pilot key injection through application idle, all animation completion, and a whole-screen widget message barrier",
+      "acceptance_metric": false,
+      "note": "Conservative supplemental diagnostic; Pilot.press waits for all animations and therefore is not the first-response boundary."
+    },
+    "terminal_size": {
+      "columns": 140,
+      "rows": 42
+    },
+    "load_measurement_boundary": "load: before source read through mounted Textual screen and idle queue"
+  },
+  "regression_suite": {
+    "command": "/Users/sean/pureTextAnnotator/.venv/bin/python -m pytest",
+    "exit_code": 0,
+    "elapsed_ms": 62406.241,
+    "passed": true,
+    "output_tail": "........................................................................ [ 39%]\n........................................................................ [ 79%]\n.....................................                                    [100%]\n181 passed in 61.41s (0:01:01)"
+  },
+  "acceptance_summary": {
+    "checks": {
+      "at_least_100_rematch_cases": true,
+      "unique_unchanged_quote_at_least_95_percent": true,
+      "source_not_over_1_mib": true,
+      "one_thousand_annotations": true,
+      "ten_loads_each_not_over_2_seconds": true,
+      "two_hundred_operations_at_least_95_percent_within_100_ms": true,
+      "regression_suite": true
+    },
+    "all_required_checks_measured": true,
+    "overall_pass": true,
+    "supplemental_full_settle_is_acceptance_metric": false
+  }
+}

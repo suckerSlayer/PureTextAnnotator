@@ -81,6 +81,7 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
     source = _source(tmp_path / "paper.pdf")
     saved = []
     embedding_settings = []
+    annotation_paths = []
 
     class FakeViewerApp:
         def __init__(
@@ -90,11 +91,13 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
             soft_wrap,
             initial_source_cursor,
             embed_on_annotation_save,
+            annotation_store,
         ) -> None:
             assert loaded_source is source
             assert soft_wrap is True
             assert initial_source_cursor == (1, 2)
             embedding_settings.append(embed_on_annotation_save)
+            annotation_paths.append(annotation_store.path)
             self.source = loaded_source
             self.quit_completed = True
             self.exit_source_cursor = (2, 3)
@@ -118,11 +121,28 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
 
     assert saved == [(source, (2, 3))]
     assert embedding_settings == [True]
+    assert annotation_paths == [
+        source.path.with_name(source.path.name + ".annotations.md")
+    ]
 
     saved.clear()
     embedding_settings.clear()
+    annotation_paths.clear()
     assert viewer_cli.main(
         ["--no-embed-on-save", str(source.path)]
     ) == 0
     assert saved == [(source, (2, 3))]
     assert embedding_settings == [False]
+    assert annotation_paths == [
+        source.path.with_name(source.path.name + ".annotations.md")
+    ]
+
+    saved.clear()
+    embedding_settings.clear()
+    annotation_paths.clear()
+    custom_sidecar = tmp_path / "old-review.md"
+    assert viewer_cli.main(
+        ["--annotations", str(custom_sidecar), str(source.path)]
+    ) == 0
+    assert saved == [(source, (2, 3))]
+    assert annotation_paths == [custom_sidecar.resolve()]

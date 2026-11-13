@@ -364,6 +364,46 @@ def test_duplicate_annotation_ids_are_malformed(tmp_path: Path) -> None:
     assert all("duplicate annotation ID" in item.explanation for item in report.items)
 
 
+def test_sidecar_validation_rejects_malformed_reserved_blocks(
+    tmp_path: Path,
+) -> None:
+    from pure_text_annotator.rematch import (
+        AnnotationDocumentValidationError,
+        validate_annotation_document,
+    )
+
+    source_path = tmp_path / "source.md"
+    source_path.write_text("alpha", encoding="utf-8")
+    store = AnnotationStore(source_path)
+    valid = store.append_to_text(
+        store.initial_text(),
+        (
+            create_record(
+                AnnotationDraft(0, 5, "alpha"),
+                "note",
+                annotation_id="valid-id",
+                source_text="alpha",
+            ),
+        ),
+    )
+    validate_annotation_document(valid)
+    validate_annotation_document("# Ordinary Markdown without PTA records\n")
+
+    malformed = valid.replace("<!-- /pta:annotation -->", "")
+    with pytest.raises(
+        AnnotationDocumentValidationError, match="no end marker"
+    ):
+        validate_annotation_document(malformed)
+
+    malformed_marker = valid.replace(
+        'id="valid-id" -->', "id=valid-id -->", 1
+    )
+    with pytest.raises(
+        AnnotationDocumentValidationError, match="malformed annotation marker"
+    ):
+        validate_annotation_document(malformed_marker)
+
+
 def test_repeated_rematches_append_history_and_refresh_anchors(
     tmp_path: Path,
 ) -> None:

@@ -34,6 +34,10 @@ class RematchStatus(str, Enum):
     MALFORMED = "Malformed"
 
 
+class AnnotationDocumentValidationError(ValueError):
+    """Raised when a sidecar cannot be safely persisted as PTA Markdown."""
+
+
 @dataclass(frozen=True)
 class ParsedAnnotation:
     """A complete annotation plus source spans needed for safe rewriting."""
@@ -123,6 +127,12 @@ _MARKER_RE = re.compile(
 )
 _END_MARKER_RE = re.compile(
     r'^<!-- /pta:annotation -->[ \t]*(?:\n|$)', re.MULTILINE
+)
+_RESERVED_MARKER_LINE_RE = re.compile(
+    r"^<!-- pta:annotation\b[^\n]*(?:\n|$)", re.MULTILINE
+)
+_RESERVED_END_LINE_RE = re.compile(
+    r"^<!-- /pta:annotation\b[^\n]*(?:\n|$)", re.MULTILINE
 )
 _JSON_STRING = r'("(?:\\.|[^"\\])*")'
 
@@ -348,6 +358,114 @@ def parse_annotation_records(sidecar_text: str) -> Tuple[ParsedAnnotation, ...]:
         else record
         for record in records
     )
+
+
+def validate_annotation_document(sidecar_text: str) -> None:
+    """Validate every reserved PTA block before replacing a sidecar file.
+
+    Markdown outside PTA markers is deliberately unrestricted. Legacy records
+    may omit newer optional metadata, but marker balance, stable identity,
+    ranges, types, quotation sections, and unique IDs must remain parseable.
+    """
+
+    events = sorted(
+        (
+            (match.start(), "open", match)
+            for match in _MARKER_RE.finditer(sidecar_text)
+        ),
+        key=lambda event: event[0],
+    ) + sorted(
+        (
+            (match.start(), "close", match)
+            for match in _END_MARKER_RE.finditer(sidecar_text)
+        ),
+        key=lambda event: event[0],
+    )
+    events.sort(key=lambda event: event[0])
+
+    errors: List[str] = []
+    parsed_open_positions = {
+        match.start() for match in _MARKER_RE.finditer(sidecar_text)
+    }
+    parsed_close_positions = {
+        match.start() for match in _END_MARKER_RE.finditer(sidecar_text)
+    }
+    for match in _RESERVED_MARKER_LINE_RE.finditer(sidecar_text):
+        if match.start() not in parsed_open_positions:
+            line = sidecar_text.count("\n", 0, match.start()) + 1
+            errors.append(f"malformed annotation marker at line {line}")
+    for match in _RESERVED_END_LINE_RE.finditer(sidecar_text):
+        if match.start() not in parsed_close_positions:
+            line = sidecar_text.count("\n", 0, match.start()) + 1
+            errors.append(f"malformed annotation end marker at line {line}")
+
+    open_position: Optional[int] = None
+    for position, kind, _match in events:
+        line = sidecar_text.count("\n", 0, position) + 1
+        if kind == "open":
+            if open_position is not None:
+                errors.append(f"nested annotation marker at line {line}")
+            else:
+                open_position = position
+        elif open_position is None:
+            errors.append(f"unmatched annotation end marker at line {line}")
+        else:
+            open_position = None
+    if open_position is not None:
+        line = sidecar_text.count("\n", 0, open_position) + 1
+        errors.append(f"annotation starting at line {line} has no end marker")
+
+    records = parse_annotation_records(sidecar_text)
+    marker_count = len(tuple(_MARKER_RE.finditer(sidecar_text)))
+    if len(records) != marker_count:
+        errors.append("not every annotation marker could be parsed")
+    for record in records:
+        block = sidecar_text[record.block_start : record.block_end]
+        marker = _MARKER_RE.search(block)
+        marker_id: Optional[str] = None
+        if marker is not None:
+            marker_attributes = marker.group("attributes")
+            marker_id_match = re.search(
+                rf"\bid={_JSON_STRING}", marker_attributes
+            )
+            if marker_id_match is not None:
+                try:
+                    value = json.loads(marker_id_match.group(1))
+                except json.JSONDecodeError:
+                    value = None
+                if isinstance(value, str) and value:
+                    marker_id = value
+            if "id=" in marker_attributes and marker_id is None:
+                line = sidecar_text.count("\n", 0, record.block_start) + 1
+                errors.append(f"malformed annotation marker at line {line}")
+        fence_open = re.search(r"(?m)^```yaml[ \t]*(?:\n|$)", block)
+        fence_close = (
+            re.search(r"(?m)^```[ \t]*(?:\n|$)", block[fence_open.end() :])
+            if fence_open is not None
+            else None
+        )
+        metadata = ""
+        if fence_open is not None and fence_close is not None:
+            metadata_start = fence_open.end()
+            metadata_end = metadata_start + fence_close.start()
+            metadata = block[metadata_start:metadata_end]
+        if marker_id is None and not _json_field(metadata, "id"):
+            errors.append(
+                f"annotation {record.ordinal} is missing a stable ID"
+            )
+        errors.extend(
+            f"annotation {record.ordinal}: {error}"
+            for error in record.errors
+        )
+
+    if errors:
+        detail = "; ".join(errors[:4])
+        if len(errors) > 4:
+            detail += f"; and {len(errors) - 4} more error(s)"
+        raise AnnotationDocumentValidationError(
+            "annotation structure is invalid; disk file was not changed: "
+            + detail
+        )
 
 
 def _all_occurrences(text: str, needle: str) -> Tuple[int, ...]:

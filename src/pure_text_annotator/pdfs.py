@@ -19,6 +19,7 @@ from pdfplumber.utils.text import LIGATURES
 from platformdirs import user_cache_path
 
 from .annotations import PdfAnchor, PdfAnchorFragment, PdfQuad, PdfRectangle
+from .file_safety import DiskFingerprint
 from .files import LoadedTextFile, PathInput, TextFileError
 
 
@@ -644,6 +645,11 @@ def load_pdf_file(
                         source_kind="pdf",
                         editable=False,
                         pdf_document=cached_document,
+                        disk_fingerprint=DiskFingerprint(
+                            exists=True,
+                            size_bytes=len(raw),
+                            sha256=document_sha256,
+                        ),
                     )
         except (OSError, RuntimeError, ValueError):
             cache_path = None
@@ -786,6 +792,11 @@ def load_pdf_file(
         source_kind="pdf",
         editable=False,
         pdf_document=document,
+        disk_fingerprint=DiskFingerprint(
+            exists=True,
+            size_bytes=len(raw),
+            sha256=document_sha256,
+        ),
     )
     if cache_path is not None:
         _store_pdf_cache(
@@ -827,6 +838,11 @@ def rebind_loaded_pdf(
         source,
         size_bytes=len(raw),
         pdf_document=document,
+        disk_fingerprint=DiskFingerprint(
+            exists=True,
+            size_bytes=len(raw),
+            sha256=document_sha256,
+        ),
     )
     if use_cache:
         _store_pdf_cache(

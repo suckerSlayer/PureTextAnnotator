@@ -47,6 +47,8 @@ def test_pdf_cache_reuses_exact_text_and_geometry(tmp_path: Path) -> None:
     first = load_pdf_file(pdf_path, cache_dir=cache_dir)
     digest = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
     cache_path = pdf_cache_path(digest, cache_dir)
+    assert first.disk_fingerprint is not None
+    assert first.disk_fingerprint.sha256 == digest
     assert cache_path.is_file()
     if os.name != "nt":
         assert cache_path.stat().st_mode & 0o777 == 0o600
@@ -59,6 +61,7 @@ def test_pdf_cache_reuses_exact_text_and_geometry(tmp_path: Path) -> None:
         second = load_pdf_file(pdf_path, cache_dir=cache_dir)
 
     assert second.text == first.text
+    assert second.disk_fingerprint == first.disk_fingerprint
     assert second.pdf_document == first.pdf_document
     assert second.pdf_document is not None
     start = second.text.index("beta")

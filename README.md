@@ -21,6 +21,7 @@ python -m pip install -e ".[dev]"
 pta-view path/to/file.txt
 pta-view path/to/file.md
 pta-view path/to/paper.pdf
+pta-view --annotations path/to/old.annotations.md path/to/renamed-file.md
 ```
 
 You can also run the package directly:
@@ -30,6 +31,26 @@ python -m pure_text_annotator path/to/file.md
 ```
 
 Use `--no-wrap` to keep long lines unwrapped.
+
+## Formal acceptance results
+
+The reproducible thesis acceptance run uses 120 ground-truth rematch cases and
+a generated 1,000,000-byte source with 1000 annotations. On the recorded Apple
+M4 Mac mini environment, unique unchanged quotations were located correctly in
+65/65 cases, all 10 complete loads finished within 2 seconds, and 197/200
+common operations (98.5%) responded within 100 ms. The complete regression
+suite passed 181 tests.
+
+Read [the formal acceptance report](FORMAL_ACCEPTANCE_TEST_REPORT.md) for the
+measurement boundaries, all results, limitations, and the separate
+full-animation diagnostic. Reproduce the run with:
+
+```bash
+.venv/bin/python acceptance/run_acceptance.py
+```
+
+The deterministic cases, machine-readable results, fixture hashes, and more
+detailed instructions are under [`acceptance/`](acceptance/README.md).
 
 ## PDF support
 
@@ -273,6 +294,8 @@ python -c "from pure_text_annotator.session_state import session_state_directory
 | Ctrl+W in Edit mode | Delete the previous word |
 | Ctrl+H in Edit mode | Delete the previous character |
 | Ctrl+S | Save dirty source and annotation buffers without quitting |
+| `m`, then `L` | Reload source and annotation files from disk |
+| `m`, then `P` | Review and confirm a moved or renamed source binding |
 | Escape or Ctrl+`[` in Edit mode | Return to Normal mode |
 | `u` in Normal mode | Undo the most recent edit batch |
 | Ctrl+R in Normal mode | Redo the most recently undone batch |
@@ -338,6 +361,11 @@ default. The menu provides these actions:
   verified, atomic Markdown-to-PDF reconciliation. It is available only for PDF
   sources and remains available when `--no-embed-on-save` disables automatic
   synchronization.
+- **Reload files from disk** rereads both the source and annotation sidecar. If
+  a PTA buffer is modified, the menu first offers to cancel, discard it by
+  reloading, or preserve it as a conflict copy before reloading.
+- **Rebind source path** is enabled when the loaded managed sidecar records a
+  different source. It opens the same explicit review shown at startup.
 
 In Normal mode, Ctrl+N and Ctrl+P move through visible annotations and stop at the last
 or first annotation instead of wrapping. In the source pane, navigation follows
@@ -377,6 +405,87 @@ modified; save or discard those edits first.
 Source edits do not silently rewrite existing annotation ranges or quoted
 original text. After saving with Ctrl+S and returning to Normal mode, press `R`
 to scan for stale annotations and review proposed rematches.
+
+## External edits and safe saving
+
+PTA records an exact SHA-256 fingerprint of the source and annotation file bytes
+when each file is loaded. Before Ctrl+S, quit-time Save, structured annotation
+creation/editing/deletion, or manual PDF synchronization can replace a tracked
+file, PTA rereads the disk bytes and compares them with that baseline. The
+atomic writer checks the fingerprint again immediately before replacement. A
+change made by another editor is therefore never overwritten silently, even if
+the visible text would normalize to the same newlines.
+
+PTA distinguishes four states for each pane: unchanged, memory-only change,
+disk-only change, and changes on both sides. A detected disk change opens a
+compact panel while both text panes remain visible:
+
+- **Cancel** leaves the disk and PTA buffers untouched.
+- **Reload disk** accepts the external file. For a both-sides conflict, this
+  discards that pane's unsaved PTA buffer.
+- **Conflict copy + reload** first writes the PTA buffer beside the original as
+  `name.pta-conflict-YYYYMMDDTHHMMSSZ.ext`, without replacing either the
+  external file or an older conflict copy, and then reloads the external file.
+
+Press `m`, then `L` at any time for an explicit reload. With clean buffers it
+reloads immediately; with unsaved buffers it presents the same preservation
+choices. PTA intentionally uses this explicit command rather than background
+file watching, so a partially written external file is never adopted without a
+user action.
+
+### Move or rename a source
+
+Managed annotation files store `source` as a path relative to the sidecar when
+the platform permits it. Moving the source and sidecar together while keeping
+their relative layout therefore needs no repair. If the source was renamed, or
+the two files were moved separately, open the new source with the existing
+sidecar explicitly:
+
+```bash
+pta-view --annotations path/to/existing.annotations.md path/to/new-source.md
+```
+
+`--annotations` selects a non-standard sidecar for that launch only. Rebinding
+is deliberately one-way: it records "this sidecar belongs to this source" in
+the sidecar's `source` field, but it does not store a reverse association that
+would let the source find that sidecar later. PTA does not scan for alternative
+sidecar names. On the next launch, `pta-view path/to/new-source.md` again looks
+only for the standard adjacent file
+`new-source.md.annotations.md`; reuse of any differently named or differently
+located sidecar requires `--annotations` again.
+
+Accordingly, **Rebind source path** is not a sidecar picker. It is enabled only
+after a managed sidecar has already been loaded and its recorded `source` path
+does not resolve to the currently open source. It is gray when the loaded pair
+already matches, after a successful confirmation, or when PTA opened the
+standard default instead of the intended non-standard sidecar. To avoid passing
+`--annotations` on future launches, keep the sidecar beside the source with the
+exact standard name `<source filename>.annotations.md`; after relocating it,
+confirm a path mismatch once if PTA requests it.
+
+When the recorded and current resolved paths differ, PTA leaves both documents
+visible and opens a compact confirmation panel. It shows both paths and an
+approximate compatibility percentage based on saved whole-document hashes,
+exact recorded ranges, and quotations still found in the current source. Press
+`R` in that panel to confirm, or Escape to cancel. The same panel can be reopened
+with `m`, then `P`.
+
+Confirmation atomically rewrites only the front matter `source` value. It does
+not change a range, quotation, note, PDF geometry anchor, or source byte. Until
+confirmation, editing, saving, annotation creation/deletion, rematching, and PDF
+synchronization are blocked; navigation, search, copy, and explicit reload stay
+available. If the source content also changed, confirm the path first and then
+press `R` in the normal interface to review range rematches separately. A disk
+change detected during confirmation stops the rewrite and enters the normal
+external-change review instead of overwriting it.
+
+Before an edited annotation sidecar is saved or reloaded, every reserved PTA
+block is validated for balanced markers, stable identity, unique IDs, supported
+type, valid range metadata, and required quotation/note sections. Ordinary
+Markdown outside PTA blocks remains unrestricted. If validation fails, the
+existing disk file is retained byte-for-byte and the error identifies the
+malformed record; repair it externally or preserve the in-memory text as a
+conflict copy.
 
 The viewer uses Textual's terminal clipboard support and also invokes the
 native clipboard utility on macOS, Windows, Wayland, or X11 when one is

@@ -18,10 +18,12 @@ from pure_text_annotator.app import (
     DeleteAnnotationModal,
     EditAnnotationModal,
     EditWarningModal,
+    ExternalFileChangeModal,
     KeybindingsModal,
     NoteModal,
     QuitChangesModal,
     SearchInput,
+    SourceRebindModal,
     SyncMode,
     ViewerApp,
     VimTextArea,
@@ -380,6 +382,442 @@ def test_ctrl_s_saves_dirty_panes_without_quitting(tmp_path: Path) -> None:
                 encoding="utf-8"
             ) == annotator.text
             assert annotator.text.endswith("note")
+            assert app._dirty_panes() == ()
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_s_never_overwrites_external_source_change(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("i")
+            await pilot.pause()
+            app.screen.query_one("#edit-confirmation", Input).value = "Yes"
+            await pilot.press("enter", "x")
+            source_path.write_text("external", encoding="utf-8")
+
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ExternalFileChangeModal)
+            source_state = next(
+                state for state in app.screen.states if state.pane == "source"
+            )
+            assert source_state.change_state.value == "memory-and-disk"
+            assert source_path.read_text(encoding="utf-8") == "external"
+            assert viewer.text == "xalpha"
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._dirty_panes() == ("source",)
+            assert source_path.read_text(encoding="utf-8") == "external"
+
+    asyncio.run(scenario())
+
+
+def test_external_conflict_can_reload_or_preserve_copy(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            await pilot.press("i")
+            await pilot.pause()
+            app.screen.query_one("#edit-confirmation", Input).value = "Yes"
+            await pilot.press("enter", "x")
+            source_path.write_text("external", encoding="utf-8")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert isinstance(app.screen, ExternalFileChangeModal)
+
+            await pilot.press("c")
+            for _ in range(4):
+                await pilot.pause()
+
+            copies = tuple(tmp_path.glob("source.pta-conflict-*.md"))
+            assert len(copies) == 1
+            assert copies[0].read_text(encoding="utf-8") == "xalpha"
+            assert source_path.read_text(encoding="utf-8") == "external"
+            assert viewer.text == "external"
+            assert app._dirty_panes() == ()
+
+    asyncio.run(scenario())
+
+
+def test_manual_menu_reload_reads_external_source_and_sidecar(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            source_path.write_text("external source", encoding="utf-8")
+            app.annotation_store.path.write_text(
+                "# External annotations\n", encoding="utf-8"
+            )
+
+            await pilot.press("m", "l")
+            for _ in range(4):
+                await pilot.pause()
+
+            assert app.query_one(VimTextArea).text == "external source"
+            assert (
+                app.query_one(AnnotationTextArea).canonical_text
+                == "# External annotations\n"
+            )
+            assert app._dirty_panes() == ()
+
+    asyncio.run(scenario())
+
+
+def test_moved_source_requires_explicit_sidecar_rebind(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        old_source = tmp_path / "old-name.md"
+        new_source = tmp_path / "new-name.md"
+        source_text = "alpha beta gamma"
+        old_source.write_text(source_text, encoding="utf-8")
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir()
+        sidecar = notes_dir / "review.md"
+        old_store = AnnotationStore(old_source, sidecar_path=sidecar)
+        old_store.append(
+            create_record(
+                AnnotationDraft(0, 5, "alpha"),
+                "Keep this note",
+                annotation_id="moved-note",
+                source_text=source_text,
+            )
+        )
+        old_source.rename(new_source)
+        before = sidecar.read_text(encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(new_source),
+            annotation_store=AnnotationStore(
+                new_source,
+                sidecar_path=sidecar,
+            ),
+            clipboard_writer=lambda _text: "test",
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, SourceRebindModal)
+            assert "Compatibility estimate: 100%" in app.screen.query_one(
+                "#source-rebind-evidence", Static
+            ).render().plain
+            assert app.screen.query_one(
+                "#source-rebind-dialog"
+            ).region.height < app.size.height
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._source_rebind_required is True
+            assert "REBIND REQUIRED" in app.query_one(
+                "#status", Static
+            ).render().plain
+            assert sidecar.read_text(encoding="utf-8") == before
+
+            await pilot.press("i")
+            await pilot.pause()
+            assert isinstance(app.screen, SourceRebindModal)
+            assert app.query_one(VimTextArea).edit_mode is False
+            await pilot.press("escape", "m", "p")
+            await pilot.pause()
+            assert isinstance(app.screen, SourceRebindModal)
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert not isinstance(app.screen, SourceRebindModal)
+            assert app._source_rebind_required is False
+            saved = sidecar.read_text(encoding="utf-8")
+            assert 'source: "../new-name.md"' in saved
+            assert before[before.index("# Annotations") :] == saved[
+                saved.index("# Annotations") :
+            ]
+            assert "REBIND REQUIRED" not in app.query_one(
+                "#status", Static
+            ).render().plain
+
+    asyncio.run(scenario())
+
+
+def test_rebind_estimate_reports_shifted_anchor_without_changing_range(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        old_source = tmp_path / "old.txt"
+        new_source = tmp_path / "moved.txt"
+        original_text = "alpha beta"
+        old_source.write_text(original_text, encoding="utf-8")
+        sidecar = tmp_path / "review.annotations.md"
+        old_store = AnnotationStore(old_source, sidecar_path=sidecar)
+        old_store.append(
+            create_record(
+                AnnotationDraft(0, 5, "alpha"),
+                "Shifted note",
+                source_text=original_text,
+            )
+        )
+        new_source.write_text("prefix alpha beta", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(new_source),
+            annotation_store=AnnotationStore(
+                new_source,
+                sidecar_path=sidecar,
+            ),
+            clipboard_writer=lambda _text: "test",
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, SourceRebindModal)
+            evidence = app.screen.query_one(
+                "#source-rebind-evidence", Static
+            ).render().plain
+            assert "Compatibility estimate: 85%" in evidence
+            assert "Exact ranges 0/1" in evidence
+
+            await pilot.press("r")
+            await pilot.pause()
+            saved = sidecar.read_text(encoding="utf-8")
+            assert "  start: 0" in saved
+            assert "  end: 5" in saved
+            assert 'source: "moved.txt"' in saved
+
+    asyncio.run(scenario())
+
+
+def test_rebind_never_overwrites_a_concurrent_sidecar_change(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        old_source = tmp_path / "old.txt"
+        new_source = tmp_path / "new.txt"
+        old_source.write_text("alpha", encoding="utf-8")
+        sidecar = tmp_path / "notes.md"
+        AnnotationStore(old_source, sidecar_path=sidecar).write(
+            AnnotationStore(old_source, sidecar_path=sidecar).initial_text()
+        )
+        old_source.rename(new_source)
+        app = ViewerApp(
+            load_text_file(new_source),
+            annotation_store=AnnotationStore(
+                new_source,
+                sidecar_path=sidecar,
+            ),
+            clipboard_writer=lambda _text: "test",
+        )
+
+        async with app.run_test(size=(120, 28)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, SourceRebindModal)
+            external = sidecar.read_text(encoding="utf-8") + "\nExternal edit.\n"
+            sidecar.write_text(external, encoding="utf-8")
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert isinstance(app.screen, ExternalFileChangeModal)
+            assert sidecar.read_text(encoding="utf-8") == external
+
+    asyncio.run(scenario())
+
+
+def test_pdf_reconciliation_waits_for_source_rebind(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_source = tmp_path / "old.pdf"
+    new_source = tmp_path / "renamed.pdf"
+    old_source.write_bytes(b"placeholder PDF bytes")
+    sidecar = tmp_path / "review.md"
+    old_store = AnnotationStore(old_source, sidecar_path=sidecar)
+    old_store.write(old_store.initial_text())
+    old_source.rename(new_source)
+    imported = []
+    monkeypatch.setattr(
+        "pure_text_annotator.app.import_pdf_text_markups",
+        lambda *_args, **_kwargs: imported.append(True),
+    )
+    source = LoadedTextFile(
+        path=new_source.resolve(),
+        text="Extracted text",
+        size_bytes=new_source.stat().st_size,
+        line_count=1,
+        source_kind="pdf",
+        editable=False,
+    )
+
+    app = ViewerApp(
+        source,
+        annotation_store=AnnotationStore(new_source, sidecar_path=sidecar),
+        clipboard_writer=lambda _text: "test",
+    )
+
+    assert app._source_rebind_required is True
+    assert imported == []
+
+
+def test_manual_reload_rejects_malformed_external_sidecar(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+        loaded_annotations = app.annotation_store.initial_text()
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            malformed = '<!-- pta:annotation id="broken" -->\n'
+            app.annotation_store.path.write_text(malformed, encoding="utf-8")
+
+            await pilot.press("m", "l")
+            for _ in range(4):
+                await pilot.pause()
+
+            assert (
+                app.query_one(AnnotationTextArea).canonical_text
+                == loaded_annotations
+            )
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == malformed
+
+    asyncio.run(scenario())
+
+
+def test_malformed_annotation_buffer_is_not_saved(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            annotator = app.query_one(AnnotationTextArea)
+            malformed = (
+                app.annotation_store.initial_text()
+                + '\n<!-- pta:annotation id="broken" -->\n'
+            )
+            annotator.load_annotation_text(malformed)
+            await pilot.pause()
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert not app.annotation_store.path.exists()
+            assert app._dirty_panes() == ("annotations",)
+
+    asyncio.run(scenario())
+
+
+def test_new_annotation_does_not_overwrite_external_sidecar(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha beta", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.press("v", "l", "a")
+            await pilot.pause()
+            assert isinstance(app.screen, NoteModal)
+            app.annotation_store.path.write_text(
+                "# External annotation edit\n", encoding="utf-8"
+            )
+            app.screen.query_one("#note-input", TextArea).load_text(
+                "Buffered PTA note"
+            )
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ExternalFileChangeModal)
+            assert app.annotation_store.path.read_text(
+                encoding="utf-8"
+            ) == "# External annotation edit\n"
+            assert "Buffered PTA note" in app.query_one(
+                AnnotationTextArea
+            ).canonical_text
+            assert app._dirty_panes() == ("annotations",)
+
+    asyncio.run(scenario())
+
+
+def test_quit_save_waits_for_external_conflict_resolution(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            await pilot.press("i")
+            await pilot.pause()
+            app.screen.query_one("#edit-confirmation", Input).value = "Yes"
+            await pilot.press("enter", "x", "escape")
+            source_path.write_text("external", encoding="utf-8")
+            await pilot.press("q")
+            await pilot.pause()
+            assert isinstance(app.screen, QuitChangesModal)
+
+            await pilot.press("s")
+            await pilot.pause()
+            assert isinstance(app.screen, ExternalFileChangeModal)
+            assert app.quit_completed is False
+            assert source_path.read_text(encoding="utf-8") == "external"
+
+            await pilot.press("r")
+            for _ in range(4):
+                await pilot.pause()
+
+        assert app.quit_completed is True
+        assert source_path.read_text(encoding="utf-8") == "external"
+
+    asyncio.run(scenario())
+
+
+def test_ctrl_s_offers_reload_for_disk_only_change(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source_path = tmp_path / "source.md"
+        source_path.write_text("alpha", encoding="utf-8")
+        app = ViewerApp(
+            load_text_file(source_path), clipboard_writer=lambda _text: "test"
+        )
+
+        async with app.run_test(size=(110, 24)) as pilot:
+            source_path.write_text("external", encoding="utf-8")
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ExternalFileChangeModal)
+            assert app.screen.states[0].change_state.value == "disk-only"
+            await pilot.press("r")
+            for _ in range(4):
+                await pilot.pause()
+
+            assert app.query_one(VimTextArea).text == "external"
             assert app._dirty_panes() == ()
 
     asyncio.run(scenario())

@@ -13,11 +13,15 @@ from pure_text_annotator.annotations import (
     create_record,
     delete_annotation_block,
     draft_from_selection,
+    inspect_source_binding,
     location_to_offset,
     parse_annotation_links,
     parse_annotation_ranges,
+    rewrite_source_binding,
+    source_reference_for,
     update_annotation_block,
 )
+from pure_text_annotator.file_safety import ConcurrentFileChangeError
 
 
 def test_location_to_offset_uses_unicode_code_points() -> None:
@@ -83,6 +87,75 @@ def test_store_preserves_existing_text_when_appending(tmp_path: Path) -> None:
     assert "> two" in saved
 
 
+def test_custom_sidecar_records_relative_source_and_can_rebind(
+    tmp_path: Path,
+) -> None:
+    documents = tmp_path / "documents"
+    notes = tmp_path / "notes"
+    documents.mkdir()
+    notes.mkdir()
+    source = documents / "chapter.md"
+    source.write_text("alpha", encoding="utf-8")
+    sidecar = notes / "research.annotations.md"
+    store = AnnotationStore(source, sidecar_path=sidecar)
+    text = store.initial_text()
+
+    assert source_reference_for(source, sidecar) == "../documents/chapter.md"
+    assert 'source: "../documents/chapter.md"' in text
+    binding = inspect_source_binding(
+        text,
+        sidecar_path=sidecar,
+        current_source_path=source,
+    )
+    assert binding.managed is True
+    assert binding.valid is True
+    assert binding.matches is True
+
+    renamed = documents / "renamed.md"
+    source.rename(renamed)
+    moved_binding = inspect_source_binding(
+        text,
+        sidecar_path=sidecar,
+        current_source_path=renamed,
+    )
+    assert moved_binding.matches is False
+    assert moved_binding.recorded_path == source.resolve()
+
+    rebound = rewrite_source_binding(
+        text + "\nUser content remains.\n",
+        sidecar_path=sidecar,
+        current_source_path=renamed,
+    )
+    assert 'source: "../documents/renamed.md"' in rebound
+    assert "User content remains." in rebound
+    assert inspect_source_binding(
+        rebound,
+        sidecar_path=sidecar,
+        current_source_path=renamed,
+    ).matches
+
+
+def test_unmanaged_markdown_does_not_require_source_rebinding(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.md"
+    sidecar = tmp_path / "notes.md"
+    binding = inspect_source_binding(
+        "# User-managed notes\n",
+        sidecar_path=sidecar,
+        current_source_path=source,
+    )
+
+    assert binding.managed is False
+    assert binding.matches is True
+    with pytest.raises(ValueError, match="no managed PTA front matter"):
+        rewrite_source_binding(
+            "# User-managed notes\n",
+            sidecar_path=sidecar,
+            current_source_path=source,
+        )
+
+
 def test_batch_append_refuses_changed_sidecar(tmp_path: Path) -> None:
     source = tmp_path / "chapter.txt"
     source.write_text("one two", encoding="utf-8")
@@ -111,6 +184,22 @@ def test_store_replaces_complete_annotation_document(tmp_path: Path) -> None:
 
     assert saved == "# Edited annotations\n"
     assert store.path.read_text(encoding="utf-8") == saved
+
+
+def test_store_refuses_replacement_after_external_byte_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chapter.md"
+    source.write_text("source", encoding="utf-8")
+    store = AnnotationStore(source)
+    store.path.write_text("loaded\n", encoding="utf-8")
+    _loaded, fingerprint = store.read_snapshot()
+    store.path.write_text("external\n", encoding="utf-8")
+
+    with pytest.raises(ConcurrentFileChangeError, match="changed on disk"):
+        store.write("in-memory\n", expected_fingerprint=fingerprint)
+
+    assert store.path.read_text(encoding="utf-8") == "external\n"
 
 
 def test_parse_annotation_ranges_reads_persisted_metadata(tmp_path: Path) -> None:

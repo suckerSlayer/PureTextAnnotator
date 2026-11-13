@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
+from .file_safety import (
+    ConcurrentFileChangeError,
+    DiskFingerprint,
+    DiskFingerprintError,
+    fingerprint_bytes,
+    require_unchanged,
+)
+
 
 if TYPE_CHECKING:
     from .pdfs import PdfDocument
@@ -35,6 +43,7 @@ class LoadedTextFile:
     source_kind: str = "text"
     editable: bool = True
     pdf_document: Optional["PdfDocument"] = None
+    disk_fingerprint: Optional[DiskFingerprint] = None
 
 
 def _normalise_newlines(text: str) -> str:
@@ -81,6 +90,7 @@ def load_text_file(path_input: PathInput) -> LoadedTextFile:
         text=text,
         size_bytes=len(raw),
         line_count=line_count,
+        disk_fingerprint=fingerprint_bytes(raw),
     )
 
 
@@ -113,7 +123,12 @@ def load_source_file(
     )
 
 
-def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
+def save_text_file(
+    source: LoadedTextFile,
+    text: str,
+    *,
+    expected_fingerprint: Optional[DiskFingerprint] = None,
+) -> LoadedTextFile:
     """Atomically save edited text while preserving basic file formatting."""
 
     if not source.editable or source.source_kind != "text":
@@ -124,6 +139,12 @@ def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
     path = source.path
     temporary_path = None
     try:
+        if expected_fingerprint is not None:
+            require_unchanged(
+                path,
+                expected_fingerprint,
+                label="source file",
+            )
         original = path.read_bytes()
         mode = path.stat().st_mode & 0o7777
         has_bom = original.startswith(b"\xef\xbb\xbf")
@@ -151,7 +172,21 @@ def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
             temporary.write(encoded)
             temporary.flush()
             os.fsync(temporary.fileno())
+        if expected_fingerprint is not None:
+            require_unchanged(
+                path,
+                expected_fingerprint,
+                label="source file",
+            )
         os.replace(temporary_path, path)
+        temporary_path = None
+    except (ConcurrentFileChangeError, DiskFingerprintError):
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     except OSError as error:
         if temporary_path is not None:
             try:
@@ -166,5 +201,6 @@ def save_text_file(source: LoadedTextFile, text: str) -> LoadedTextFile:
         text=text,
         size_bytes=len(encoded),
         line_count=line_count,
+        disk_fingerprint=fingerprint_bytes(encoded),
     )
 
