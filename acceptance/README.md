@@ -53,3 +53,43 @@ first-response metric.
 Use `--skip-ui` or `--skip-regression` only for development checks. Such a run
 is explicitly marked as incomplete and cannot produce an overall acceptance
 result.
+
+## Generate the independent human-check suite
+
+The automated benchmark does not replace manual evidence for the three
+annotation types. Generate a fresh disposable suite with:
+
+```console
+.venv/bin/python acceptance/generate_manual_acceptance.py
+```
+
+Then open `acceptance/manual/generated/START_HERE.md`. It contains 13 guided
+checks for creating, filtering, editing, deleting, saving, reopening, and
+rematching Note, Highlight, and Bookmark records. The generated directory also
+contains a clean creation source, a pre-anchored rematch case, a manifest with
+hashes and expected ranges, an evidence table, and an empty `evidence/`
+directory for real screenshots.
+
+The generator refuses to overwrite an existing suite. After preserving its
+evidence, start a new run with `--force`; replacement is allowed only when the
+directory contains the generator's safety marker. Screenshots are deliberately
+not synthesized because this part of acceptance must be performed and recorded
+by a person.
+
+### Recorded human run
+
+The checked-in `manual/generated/` directory is the completed 2026-11-14 run,
+not a pristine fixture. Its `EVIDENCE_RECORD.md` reports 13/13 checks passing
+and references 20 real PNG screenshots. The post-run creation sidecar, shifted
+source, applied rematch sidecar, and `before-rematch` backup are retained as
+supporting artifacts. The manifest records the original fixture hashes, so the
+expected source/sidecar hashes intentionally differ after the exercised edits.
+
+Do not use `--force` on this recorded directory unless its evidence has first
+been archived elsewhere. To conduct another run without touching the recorded
+evidence, choose a new output directory:
+
+```console
+.venv/bin/python acceptance/generate_manual_acceptance.py \
+  --output acceptance/manual/run-YYYYMMDD
+```

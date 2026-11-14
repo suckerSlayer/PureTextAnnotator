@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "generator": "acceptance/generate_manual_acceptance.py",
+  "purpose": "three-type human acceptance",
+  "create_case": {
+    "source": "01-create/three-types.md",
+    "source_sha256": "2e88f4c8fa062e140b84c020af62da4f76554273daf389c7eef744c1b32d44ea",
+    "sidecar_must_be_absent_initially": true,
+    "target_quotes": {
+      "note": "组合锚点让批注与原文保持可审查的联系。",
+      "highlight": "黄色高亮用于标记重要内容，不要求填写说明。",
+      "bookmark_sentence": "书签目标位于这一行的“返回”二字，便于检查精确光标位置。"
+    }
+  },
+  "rematch_case": {
+    "source": "02-rematch/rematch.md",
+    "source_sha256": "8cf63d1735e6fb39127133b532a01468b189b249e757878b3bb10a9938384da5",
+    "sidecar": "02-rematch/rematch.md.annotations.md",
+    "sidecar_sha256": "7a83ed412ff286cc786b354b16df355643467858305a57f968006477f0eb717c",
+    "records": [
+      {
+        "id": "manual-note",
+        "type": "note",
+        "start": 57,
+        "end": 76,
+        "quote": "组合锚点让批注与原文保持可审查的联系。"
+      },
+      {
+        "id": "manual-highlight",
+        "type": "highlight",
+        "start": 95,
+        "end": 116,
+        "quote": "黄色高亮用于标记重要内容，不要求填写说明。"
+      },
+      {
+        "id": "manual-bookmark",
+        "type": "bookmark",
+        "start": 145,
+        "end": 146,
+        "quote": "返"
+      }
+    ]
+  },
+  "validation": {
+    "required_files": 7,
+    "rematch_records": 3,
+    "annotation_type_counts": {
+      "bookmark": 1,
+      "highlight": 1,
+      "note": 1
+    }
+  }
+}

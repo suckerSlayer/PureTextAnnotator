@@ -52,6 +52,20 @@ full-animation diagnostic. Reproduce the run with:
 The deterministic cases, machine-readable results, fixture hashes, and more
 detailed instructions are under [`acceptance/`](acceptance/README.md).
 
+For the separate human check of Note, Highlight, and Bookmark workflows, run:
+
+```bash
+.venv/bin/python acceptance/generate_manual_acceptance.py
+```
+
+Follow the generated
+[`START_HERE.md`](acceptance/manual/generated/START_HERE.md). The recorded
+acceptance run completed all 13 checks successfully and retained 20 real PNG
+screenshots; see the completed
+[`EVIDENCE_RECORD.md`](acceptance/manual/generated/EVIDENCE_RECORD.md). This
+suite is intentionally separate from the automated benchmark and does not
+fabricate screenshots.
+
 ## PDF support
 
 PDFs with an embedded text layer open as a deterministic plain-text projection.

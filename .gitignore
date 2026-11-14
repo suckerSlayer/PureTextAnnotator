@@ -53,6 +53,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+Session.vim
 *.swp
 *.swo
 *~
