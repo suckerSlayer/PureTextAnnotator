@@ -91,7 +91,6 @@ anchor:
 > r
 
 ### Note
-sjdk k
 
 
 <!-- /pta:annotation -->

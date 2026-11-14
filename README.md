@@ -66,6 +66,19 @@ screenshots; see the completed
 suite is intentionally separate from the automated benchmark and does not
 fabricate screenshots.
 
+## Documentation
+
+- [User manual](USER_MANUAL.md): installation, reading, editing, three
+  annotation types, filtering, rematching, conflict handling, rebinding, and
+  PDF workflows.
+- [Annotation format specification](ANNOTATION_FORMAT_SPEC.md): normative
+  version-1 sidecar structure, Unicode ranges, anchors, PDF extensions,
+  validation, and compatibility.
+- [Example index](examples/README.md): format examples, resettable rematch
+  cases, recorded human evidence, and machine acceptance data.
+- [Formal acceptance report](FORMAL_ACCEPTANCE_TEST_REPORT.md): accuracy,
+  performance, regression, and completed manual-acceptance results.
+
 ## PDF support
 
 PDFs with an embedded text layer open as a deterministic plain-text projection.
