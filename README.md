@@ -17,6 +17,8 @@ python -m pip install -e ".[dev]"
 
 ### Older Intel Macs
 
+#### Dependency installation
+
 On older Intel (`x86_64`) Macs, dependency installation may fall back to
 building `cryptography` from source and then fail with a Cargo/LibreSSL error
 while connecting to `index.crates.io`. Install the last `cryptography` release
@@ -31,6 +33,32 @@ python -m pip install -e ".[dev]"
 The `--only-binary` option prevents another source-build attempt. This
 workaround is intended for older Intel Macs; current Apple silicon Macs can use
 the standard setup instructions above.
+
+#### Terminal colors
+
+On some legacy macOS systems, highlight colors may render differently in a
+third-party terminal emulator even when its `TERM` and true-color settings are
+correct. A tested workaround is to create the tmux session and launch
+`pta-view` from Apple's Terminal.app, then detach and attach that session from
+the preferred terminal emulator.
+
+In Terminal.app, start a named session and run the viewer inside it:
+
+```bash
+tmux new-session -s pta
+pta-view path/to/file.txt
+```
+
+Detach from the session by pressing Ctrl+B, then D. In the preferred terminal
+emulator, attach to the same running session:
+
+```bash
+tmux attach-session -t pta
+```
+
+When `pta` is the only tmux session, the shorter `tmux a` command can be used
+instead. This keeps the color environment established through Terminal.app
+while allowing the session to be viewed and controlled from another terminal.
 
 ## Run
 
