@@ -15,6 +15,23 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+### Older Intel Macs
+
+On older Intel (`x86_64`) Macs, dependency installation may fall back to
+building `cryptography` from source and then fail with a Cargo/LibreSSL error
+while connecting to `index.crates.io`. Install the last `cryptography` release
+series that provides a compatible Intel macOS wheel before installing Pure
+Text Annotator:
+
+```bash
+python -m pip install --only-binary=cryptography "cryptography<49"
+python -m pip install -e ".[dev]"
+```
+
+The `--only-binary` option prevents another source-build attempt. This
+workaround is intended for older Intel Macs; current Apple silicon Macs can use
+the standard setup instructions above.
+
 ## Run
 
 ```bash
