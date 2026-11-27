@@ -15,10 +15,12 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
+from textual.document._wrapped_document import WrappedDocument
 from textual.geometry import Offset, Size
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
+from textual.strip import Strip
 from textual.timer import Timer
 from textual.widgets import Button, Input, LoadingIndicator, Static, TextArea
 from textual.widgets.text_area import Selection
@@ -328,6 +330,14 @@ def _position_cursor_line(text_area: TextArea, placement: str) -> None:
     )
 
 
+class _ConstantTimeHeightWrappedDocument(WrappedDocument):
+    """Expose the already-materialized wrapped height in constant time."""
+
+    @property
+    def height(self) -> int:
+        return len(self._offset_to_line_info)
+
+
 class HalfPageBottomScrollTextArea(TextArea):
     """A text area with enough trailing space to center its final line."""
 
@@ -340,6 +350,104 @@ class HalfPageBottomScrollTextArea(TextArea):
         self._jump_forward_stack: list[tuple[int, int]] = []
         self._vim_count_digits = ""
         self._vim_g_pending = False
+
+    def _set_document(self, text: str, language: Optional[str]) -> None:
+        """Use Textual's wrapped layout with an O(1) height lookup."""
+
+        super()._set_document(text, language)
+        self.wrapped_document.__class__ = _ConstantTimeHeightWrappedDocument
+
+    def render_line(self, y: int) -> Strip:
+        """Render without rebuilding the whole document for every screen row.
+
+        Textual 8.2.8 reads ``self.text`` while rendering each row and uses the
+        complete selection as a soft-wrap cache key. Both choices make cursor
+        movement and scrolling scale with the full document. The document is
+        already split into lines, and only the logical lines touched by a
+        selection, cursor, or bracket match need a distinct cache entry.
+        """
+
+        if self.document.line_count == 1 and self.document.end == (0, 0):
+            return super().render_line(y)
+
+        scroll_x, scroll_y = self.scroll_offset
+        absolute_y = scroll_y + y
+        wrapped_document = self.wrapped_document
+        try:
+            line_index = wrapped_document._offset_to_line_info[absolute_y][0]
+        except IndexError:
+            line_index = None
+
+        selection = self.selection
+        selection_start, selection_end = selection
+        cursor_row, cursor_column = selection_end
+        selection_key: object = None
+        if selection_start == selection_end:
+            if self._has_cursor and line_index == cursor_row:
+                selection_key = ("cursor", cursor_column)
+        else:
+            selection_top, selection_bottom = sorted(selection)
+            top_row, top_column = selection_top
+            bottom_row, bottom_column = selection_bottom
+            if (
+                line_index is not None
+                and top_row <= line_index <= bottom_row
+            ):
+                if top_row == bottom_row:
+                    selection_key = (
+                        "selection",
+                        top_column,
+                        bottom_column,
+                    )
+                elif line_index == top_row:
+                    selection_key = ("selection-start", top_column)
+                elif line_index == bottom_row:
+                    selection_key = ("selection-end", bottom_column)
+                else:
+                    selection_key = ("selection-middle",)
+                if self._has_cursor and line_index == cursor_row:
+                    selection_key = (
+                        selection_key,
+                        "cursor",
+                        cursor_column,
+                    )
+
+        _, cursor_y = self._cursor_offset
+        matching_bracket = self._matching_bracket_location
+        matching_bracket_key = (
+            matching_bracket
+            if matching_bracket is not None
+            and line_index in {cursor_row, matching_bracket[0]}
+            else None
+        )
+        cache_key = (
+            self.size,
+            scroll_x,
+            absolute_y,
+            selection_key,
+            (
+                selection_end
+                if (
+                    self._cursor_visible
+                    and self.cursor_blink
+                    and absolute_y == cursor_y
+                )
+                else None
+            ),
+            self.theme,
+            matching_bracket_key,
+            self.match_cursor_bracket,
+            self.soft_wrap,
+            self.show_line_numbers,
+            self.read_only,
+            self.show_cursor,
+            self.suggestion if line_index == cursor_row else None,
+        )
+        if (cached_line := self._line_cache.get(cache_key)) is not None:
+            return cached_line
+        line = self._render_line(y)
+        self._line_cache[cache_key] = line
+        return line
 
     @property
     def vim_command_text(self) -> str:
@@ -507,7 +615,10 @@ class HalfPageBottomScrollTextArea(TextArea):
 
     def _refresh_size(self) -> None:
         if self.soft_wrap:
-            base_size = Size(0, self.wrapped_document.height)
+            base_size = Size(
+                0,
+                len(self.wrapped_document._offset_to_line_info),
+            )
         else:
             width, height = self.document.get_size(self.indent_width)
             base_size = Size(width + self.gutter_width + 1, height)
@@ -4629,6 +4740,16 @@ class ViewerApp(App[None]):
         ),
     ]
 
+    def get_driver_class(self):
+        """Use button-event mouse tracking on Linux and macOS terminals."""
+
+        driver_class = super().get_driver_class()
+        if driver_class.__module__ == "textual.drivers.linux_driver":
+            from .terminal_driver import ButtonEventLinuxDriver
+
+            return ButtonEventLinuxDriver
+        return driver_class
+
     def __init__(
         self,
         source: LoadedTextFile,
@@ -4921,7 +5042,7 @@ class ViewerApp(App[None]):
 
     def _dirty_panes(self) -> tuple[str, ...]:
         dirty = []
-        if self.query_one("#viewer", VimTextArea).text != self._saved_source.text:
+        if self.source.text != self._saved_source.text:
             dirty.append("source")
         if (
             self.query_one("#annotator", AnnotationTextArea).canonical_text
@@ -5203,7 +5324,7 @@ class ViewerApp(App[None]):
         )
 
     def _valid_annotation_links(self) -> tuple[AnnotationLink, ...]:
-        source_length = len(self.query_one("#viewer", VimTextArea).text)
+        source_length = len(self.source.text)
         selected = self.annotation_type_filter
         return tuple(
             link
@@ -5220,7 +5341,7 @@ class ViewerApp(App[None]):
 
         target = self._focused_search_target()
         if isinstance(target, VimTextArea):
-            offset = location_to_offset(target.text, target.cursor_location)
+            offset = self._source_offset_for_location(target.cursor_location)
             return self._link_for_source_offset(offset)
         if isinstance(target, AnnotationTextArea):
             full_line = target.full_line_for_display(target.cursor_location[0])
@@ -5262,7 +5383,7 @@ class ViewerApp(App[None]):
                     ),
                 )
             )
-            offset = location_to_offset(target.text, target.cursor_location)
+            offset = self._source_offset_for_location(target.cursor_location)
             containing = tuple(
                 link
                 for link in ordered
@@ -5828,6 +5949,15 @@ class ViewerApp(App[None]):
         row = bisect_right(self._source_line_starts, offset) - 1
         return row, offset - self._source_line_starts[row]
 
+    def _source_offset_for_location(self, location: tuple[int, int]) -> int:
+        """Map a source cursor to an offset without joining the document."""
+
+        viewer = self.query_one("#viewer", VimTextArea)
+        if viewer.edit_mode or viewer._normal_history_pending:
+            return viewer.document.get_index_from_location(location)
+        row, column = location
+        return self._source_line_starts[row] + column
+
     @staticmethod
     def _source_offset_for_link(link: AnnotationLink) -> int:
         """Use a bookmark's exact cursor position, otherwise its range start."""
@@ -5842,7 +5972,7 @@ class ViewerApp(App[None]):
     def _align_annotation_to_source(self, *, record_jump: bool = False) -> None:
         viewer = self.query_one("#viewer", VimTextArea)
         annotator = self.query_one("#annotator", AnnotationTextArea)
-        offset = location_to_offset(viewer.text, viewer.cursor_location)
+        offset = self._source_offset_for_location(viewer.cursor_location)
         link = self._link_for_source_offset(offset)
         if link is None:
             annotator.clear_active_link()
@@ -6005,7 +6135,11 @@ class ViewerApp(App[None]):
         if search_match is None:
             return
         target = self._search_target(target_id)
-        offset = location_to_offset(target.text, target.cursor_location)
+        offset = (
+            self._source_offset_for_location(target.cursor_location)
+            if isinstance(target, VimTextArea)
+            else target.document.get_index_from_location(target.cursor_location)
+        )
         if not search_match.start <= offset < search_match.end:
             self._set_search_match(target_id, None)
 

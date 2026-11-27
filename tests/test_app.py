@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from textual.widgets import Input, Static, TextArea
+from textual.widgets.text_area import Selection
 
 from pure_text_annotator.annotations import (
     AnnotationDraft,
@@ -63,6 +64,55 @@ def test_viewer_is_read_only_and_supports_vim_movement() -> None:
             original = viewer.text
             await pilot.press("x", "backspace", "delete")
             assert viewer.text == original
+
+    asyncio.run(scenario())
+
+
+def test_large_document_rendering_avoids_full_text_rebuilds_and_reuses_lines(
+) -> None:
+    async def scenario() -> None:
+        source_text = "\n".join(f"line {index}" for index in range(2000))
+        app = ViewerApp(
+            make_source(source_text),
+            clipboard_writer=lambda _text: "test",
+        )
+        async with app.run_test(size=(100, 24)):
+            viewer = app.query_one(VimTextArea)
+            original_render_line = viewer._render_line
+            rendered_rows: list[int] = []
+
+            def counted_render_line(y: int):
+                rendered_rows.append(y)
+                return original_render_line(y)
+
+            viewer._render_line = counted_render_line
+            viewer._line_cache.clear()
+            viewer.render_line(0)
+            viewer.render_line(5)
+
+            viewer.selection = Selection.cursor((1, 0))
+            viewer.render_line(0)
+            viewer.render_line(1)
+            viewer.render_line(5)
+
+            assert rendered_rows.count(0) == 2
+            assert rendered_rows.count(1) == 1
+            assert rendered_rows.count(5) == 1
+
+            document_type = type(viewer.document)
+            original_text_property = document_type.text
+
+            def reject_full_text_read(_document) -> str:
+                raise AssertionError("render path rebuilt the complete document")
+
+            document_type.text = property(reject_full_text_read)
+            try:
+                viewer._line_cache.clear()
+                viewer.render_line(5)
+                app._refresh_status()
+                app._align_annotation_to_source()
+            finally:
+                document_type.text = original_text_property
 
     asyncio.run(scenario())
 
