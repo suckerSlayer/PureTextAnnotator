@@ -352,6 +352,7 @@ class HalfPageBottomScrollTextArea(TextArea):
         self._vim_g_pending = False
         self._pending_pointer_scroll_y = 0.0
         self._pointer_scroll_timer: Optional[Timer] = None
+        self.strip_renderer = False
 
     @property
     def pointer_scroll_interval(self) -> float:
@@ -440,6 +441,41 @@ class HalfPageBottomScrollTextArea(TextArea):
         selection = self.selection
         selection_start, selection_end = selection
         cursor_row, cursor_column = selection_end
+
+        if self.strip_renderer:
+            selection_top, selection_bottom = sorted(selection)
+            matching_bracket = self._matching_bracket_location
+            line_is_dynamic = (
+                line_index == cursor_row
+                or (
+                    selection_start != selection_end
+                    and line_index is not None
+                    and selection_top[0] <= line_index <= selection_bottom[0]
+                )
+                or (
+                    matching_bracket is not None
+                    and line_index == matching_bracket[0]
+                )
+            )
+            if not line_is_dynamic:
+                static_cache_key = (
+                    "static-strip",
+                    self.size,
+                    scroll_x,
+                    absolute_y,
+                    self.theme,
+                    self.soft_wrap,
+                    self.show_line_numbers,
+                    self.read_only,
+                )
+                if (
+                    cached_strip := self._line_cache.get(static_cache_key)
+                ) is not None:
+                    return cached_strip
+                strip = self._render_line(y)
+                self._line_cache[static_cache_key] = strip
+                return strip
+
         selection_key: object = None
         if selection_start == selection_end:
             if self._has_cursor and line_index == cursor_row:
@@ -4834,6 +4870,7 @@ class ViewerApp(App[None]):
         *,
         soft_wrap: bool = True,
         low_power: bool = False,
+        strip_renderer: bool = False,
         clipboard_writer: ClipboardWriter = copy_to_system_clipboard,
         source_writer: SourceWriter = save_text_file,
         annotation_store: Optional[AnnotationStore] = None,
@@ -4842,6 +4879,7 @@ class ViewerApp(App[None]):
     ) -> None:
         super().__init__()
         self.low_power = low_power
+        self.strip_renderer = strip_renderer
         if low_power:
             self.animation_level = "none"
         self.source = source
@@ -4984,6 +5022,7 @@ class ViewerApp(App[None]):
             if self.low_power:
                 viewer.cursor_blink = False
                 viewer.match_cursor_bracket = False
+            viewer.strip_renderer = self.strip_renderer
             viewer.border_title = (
                 "Extracted PDF text"
                 if self.source.source_kind == "pdf"
@@ -4998,6 +5037,7 @@ class ViewerApp(App[None]):
             if self.low_power:
                 annotator.cursor_blink = False
                 annotator.match_cursor_bracket = False
+            annotator.strip_renderer = self.strip_renderer
             annotator.border_title = "Annotation file"
             yield annotator
         yield Static("", markup=False, id="status")

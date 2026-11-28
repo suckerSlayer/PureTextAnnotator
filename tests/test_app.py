@@ -118,6 +118,52 @@ def test_large_document_rendering_avoids_full_text_rebuilds_and_reuses_lines(
     asyncio.run(scenario())
 
 
+def test_strip_renderer_matches_output_and_reuses_static_rows() -> None:
+    async def scenario() -> None:
+        source_text = "\n".join(f"line {index}" for index in range(30))
+        app = ViewerApp(
+            make_source(source_text),
+            clipboard_writer=lambda _text: "test",
+            strip_renderer=True,
+        )
+        async with app.run_test(size=(80, 16)) as pilot:
+            viewer = app.query_one(VimTextArea)
+
+            viewer.strip_renderer = False
+            viewer._line_cache.clear()
+            standard_strip = viewer.render_line(5)
+
+            viewer.strip_renderer = True
+            viewer._line_cache.clear()
+            original_render_line = viewer._render_line
+            rendered_rows = []
+
+            def counted_render_line(y: int):
+                rendered_rows.append(y)
+                return original_render_line(y)
+
+            viewer._render_line = counted_render_line
+            optimized_strip = viewer.render_line(5)
+            viewer.render_line(5)
+            viewer.selection = Selection.cursor((1, 1))
+            viewer.render_line(5)
+
+            assert list(optimized_strip) == list(standard_strip)
+            assert optimized_strip.cell_length == standard_strip.cell_length
+            assert rendered_rows == [5]
+
+            viewer._line_cache.clear()
+            rendered_rows.clear()
+            viewer.render_line(1)
+            viewer.selection = Selection.cursor((1, 2))
+            viewer.render_line(1)
+            assert rendered_rows == [1, 1]
+            viewer._render_line = original_render_line
+            await pilot.pause()
+
+    asyncio.run(scenario())
+
+
 def test_plain_lines_skip_unused_annotation_style_resolution() -> None:
     async def scenario() -> None:
         def reject_style_resolution(_component: str):

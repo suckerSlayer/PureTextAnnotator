@@ -92,6 +92,18 @@ matching and nonessential animations, and batches wheel or trackpad scrolling
 at 30 Hz. It can be combined with `--no-wrap`; without `--low-power`, the
 normal visual behavior remains unchanged.
 
+To A/B test the experimental Strip path, run:
+
+```bash
+pta-view --strip-renderer path/to/file.md
+pta-view --low-power --strip-renderer path/to/file.md
+```
+
+This path reuses fully rendered Textual `Strip` rows when they contain no
+cursor, selection, or bracket-match state, while dynamically rendered rows
+continue to use the regular TextArea path. It does not change long-line
+fragment rendering or document layout.
+
 ## Formal acceptance results
 
 The reproducible thesis acceptance run uses 120 ground-truth rematch cases and

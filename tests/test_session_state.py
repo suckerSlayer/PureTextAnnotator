@@ -90,6 +90,7 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
             *,
             soft_wrap,
             low_power,
+            strip_renderer,
             initial_source_cursor,
             embed_on_annotation_save,
             annotation_store,
@@ -97,6 +98,7 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
             assert loaded_source is source
             assert soft_wrap is True
             assert low_power is False
+            assert strip_renderer is False
             assert initial_source_cursor == (1, 2)
             embedding_settings.append(embed_on_annotation_save)
             annotation_paths.append(annotation_store.path)
@@ -156,6 +158,7 @@ def test_pta_view_configures_low_power_before_creating_app(
 ) -> None:
     source = _source(tmp_path / "chapter.md")
     power_settings = []
+    strip_settings = []
 
     class FakeViewerApp:
         def __init__(
@@ -164,6 +167,7 @@ def test_pta_view_configures_low_power_before_creating_app(
             *,
             soft_wrap,
             low_power,
+            strip_renderer,
             initial_source_cursor,
             embed_on_annotation_save,
             annotation_store,
@@ -174,6 +178,7 @@ def test_pta_view_configures_low_power_before_creating_app(
             assert embed_on_annotation_save is True
             assert annotation_store.path.name.endswith(".annotations.md")
             power_settings.append(low_power)
+            strip_settings.append(strip_renderer)
             self.source = loaded_source
             self.quit_completed = False
             self.exit_source_cursor = None
@@ -190,6 +195,9 @@ def test_pta_view_configures_low_power_before_creating_app(
         viewer_cli, "load_cursor_position", lambda _source: None
     )
 
-    assert viewer_cli.main(["--low-power", str(source.path)]) == 0
+    assert viewer_cli.main(
+        ["--low-power", "--strip-renderer", str(source.path)]
+    ) == 0
     assert power_settings == [True]
+    assert strip_settings == [True]
     assert os.environ["TEXTUAL_FPS"] == "30"

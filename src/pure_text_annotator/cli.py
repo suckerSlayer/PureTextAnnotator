@@ -57,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--strip-renderer",
+        action="store_true",
+        help="use the experimental cached Strip rendering path",
+    )
+    parser.add_argument(
         "--annotations",
         type=Path,
         help=(
@@ -114,6 +119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         source,
         soft_wrap=not args.no_wrap,
         low_power=args.low_power,
+        strip_renderer=args.strip_renderer,
         initial_source_cursor=load_cursor_position(source),
         embed_on_annotation_save=not args.no_embed_on_save,
         annotation_store=annotation_store,

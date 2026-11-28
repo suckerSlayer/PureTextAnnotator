@@ -95,6 +95,17 @@ pta-view --low-power --no-wrap path/to/file.md
 
 不指定 `--low-power` 时，默认视觉行为保持不变。
 
+### 3.5 实验性 Strip 渲染
+
+为了在旧设备上对比 Textual 的 Strip 行缓存方案，可以使用：
+
+```console
+pta-view --strip-renderer path/to/file.md
+pta-view --low-power --strip-renderer path/to/file.md
+```
+
+该方案复用不含光标、选择区或括号匹配状态的已渲染 Strip 行；需要动态状态的行仍使用原有 TextArea 渲染路径。它不改变长行片段渲染或文档布局，因此可以直接与默认模式进行 A/B 对比。
+
 ## 4. 界面与模式
 
 ### 4.1 双栏布局
