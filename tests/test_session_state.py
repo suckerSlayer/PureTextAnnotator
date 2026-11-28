@@ -89,12 +89,14 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
             loaded_source,
             *,
             soft_wrap,
+            low_power,
             initial_source_cursor,
             embed_on_annotation_save,
             annotation_store,
         ) -> None:
             assert loaded_source is source
             assert soft_wrap is True
+            assert low_power is False
             assert initial_source_cursor == (1, 2)
             embedding_settings.append(embed_on_annotation_save)
             annotation_paths.append(annotation_store.path)
@@ -146,3 +148,48 @@ def test_pta_view_saves_cursor_and_configures_annotation_save_embedding(
     ) == 0
     assert saved == [(source, (2, 3))]
     assert annotation_paths == [custom_sidecar.resolve()]
+
+
+def test_pta_view_configures_low_power_before_creating_app(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _source(tmp_path / "chapter.md")
+    power_settings = []
+
+    class FakeViewerApp:
+        def __init__(
+            self,
+            loaded_source,
+            *,
+            soft_wrap,
+            low_power,
+            initial_source_cursor,
+            embed_on_annotation_save,
+            annotation_store,
+        ) -> None:
+            assert loaded_source is source
+            assert soft_wrap is True
+            assert initial_source_cursor is None
+            assert embed_on_annotation_save is True
+            assert annotation_store.path.name.endswith(".annotations.md")
+            power_settings.append(low_power)
+            self.source = loaded_source
+            self.quit_completed = False
+            self.exit_source_cursor = None
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.delenv("TEXTUAL_FPS", raising=False)
+    monkeypatch.setattr(viewer_cli, "ViewerApp", FakeViewerApp)
+    monkeypatch.setattr(
+        viewer_cli, "load_source_file", lambda *_args, **_kwargs: source
+    )
+    monkeypatch.setattr(
+        viewer_cli, "load_cursor_position", lambda _source: None
+    )
+
+    assert viewer_cli.main(["--low-power", str(source.path)]) == 0
+    assert power_settings == [True]
+    assert os.environ["TEXTUAL_FPS"] == "30"

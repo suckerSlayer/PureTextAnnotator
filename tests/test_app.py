@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from textual import events
 from textual.widgets import Input, Static, TextArea
 from textual.widgets.text_area import Selection
 
@@ -113,6 +114,87 @@ def test_large_document_rendering_avoids_full_text_rebuilds_and_reuses_lines(
                 app._align_annotation_to_source()
             finally:
                 document_type.text = original_text_property
+
+    asyncio.run(scenario())
+
+
+def test_plain_lines_skip_unused_annotation_style_resolution() -> None:
+    async def scenario() -> None:
+        def reject_style_resolution(_component: str):
+            raise AssertionError(
+                "plain lines should not resolve annotation styles"
+            )
+
+        viewer = VimTextArea("alpha\nbeta", id="viewer")
+        viewer.get_component_rich_style = reject_style_resolution
+        assert viewer.get_line(1).plain == "beta"
+
+        annotator = AnnotationTextArea("plain note", id="annotator")
+        annotator.get_component_rich_style = reject_style_resolution
+        assert annotator.get_line(0).plain == "plain note"
+
+    asyncio.run(scenario())
+
+
+def test_pointer_scroll_events_are_combined_once_per_frame() -> None:
+    async def scenario() -> None:
+        source_text = "\n".join(f"line {index}" for index in range(200))
+        app = ViewerApp(
+            make_source(source_text),
+            clipboard_writer=lambda _text: "test",
+        )
+        async with app.run_test(size=(80, 16)) as pilot:
+            viewer = app.query_one(VimTextArea)
+            first_timer = None
+            for _ in range(3):
+                event = events.MouseScrollDown(
+                    viewer,
+                    x=0,
+                    y=0,
+                    delta_x=0,
+                    delta_y=1,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                )
+                viewer._on_mouse_scroll_down(event)
+                assert event._stop_propagation is True
+                if first_timer is None:
+                    first_timer = viewer._pointer_scroll_timer
+                else:
+                    assert viewer._pointer_scroll_timer is first_timer
+
+            expected_scroll = 3 * app.scroll_sensitivity_y
+            assert viewer._pending_pointer_scroll_y == expected_scroll
+            await pilot.pause(0.1)
+
+            assert viewer._pointer_scroll_timer is None
+            assert viewer._pending_pointer_scroll_y == 0
+            assert viewer.scroll_target_y == expected_scroll
+
+    asyncio.run(scenario())
+
+
+def test_low_power_mode_disables_nonessential_visual_work() -> None:
+    async def scenario() -> None:
+        app = ViewerApp(
+            make_source("(alpha)\nbeta"),
+            clipboard_writer=lambda _text: "test",
+            low_power=True,
+        )
+        assert app.animation_level == "none"
+
+        async with app.run_test(size=(80, 16)):
+            viewer = app.query_one(VimTextArea)
+            annotator = app.query_one(AnnotationTextArea)
+
+            assert viewer.cursor_blink is False
+            assert viewer.match_cursor_bracket is False
+            assert annotator.cursor_blink is False
+            assert annotator.match_cursor_bracket is False
+            assert viewer.pointer_scroll_interval == pytest.approx(1 / 30)
+            assert viewer.find_matching_bracket("(", (0, 0)) is None
 
     asyncio.run(scenario())
 

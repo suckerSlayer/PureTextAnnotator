@@ -81,6 +81,17 @@ python -m pure_text_annotator path/to/file.md
 
 Use `--no-wrap` to keep long lines unwrapped.
 
+On older or power-constrained machines, use low-power mode:
+
+```bash
+pta-view --low-power path/to/file.md
+```
+
+This caps terminal redraws at 30 FPS, uses a solid cursor, disables bracket
+matching and nonessential animations, and batches wheel or trackpad scrolling
+at 30 Hz. It can be combined with `--no-wrap`; without `--low-power`, the
+normal visual behavior remains unchanged.
+
 ## Formal acceptance results
 
 The reproducible thesis acceptance run uses 120 ground-truth rematch cases and

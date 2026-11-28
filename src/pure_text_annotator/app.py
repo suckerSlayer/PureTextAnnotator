@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence, TypeVar
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
@@ -350,6 +350,65 @@ class HalfPageBottomScrollTextArea(TextArea):
         self._jump_forward_stack: list[tuple[int, int]] = []
         self._vim_count_digits = ""
         self._vim_g_pending = False
+        self._pending_pointer_scroll_y = 0.0
+        self._pointer_scroll_timer: Optional[Timer] = None
+
+    @property
+    def pointer_scroll_interval(self) -> float:
+        """Return the wheel batching interval for the current power mode."""
+
+        return 1 / 30 if getattr(self.app, "low_power", False) else 1 / 60
+
+    def _queue_pointer_scroll(self, direction: int) -> None:
+        """Combine trackpad or wheel events into at most one scroll per frame."""
+
+        self._pending_pointer_scroll_y += (
+            direction * self.app.scroll_sensitivity_y
+        )
+        if self._pointer_scroll_timer is None:
+            self._pointer_scroll_timer = self.set_timer(
+                self.pointer_scroll_interval,
+                self._flush_pointer_scroll,
+                name=f"{self.id or 'text-area'}-pointer-scroll",
+            )
+
+    def _flush_pointer_scroll(self) -> None:
+        """Apply all wheel movement collected during the current frame."""
+
+        self._pointer_scroll_timer = None
+        delta_y = self._pending_pointer_scroll_y
+        self._pending_pointer_scroll_y = 0.0
+        if delta_y:
+            self.scroll_to(
+                y=self.scroll_target_y + delta_y,
+                animate=False,
+                immediate=True,
+            )
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_down(event)
+        elif self.allow_vertical_scroll:
+            self._queue_pointer_scroll(1)
+            event.stop()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if event.ctrl or event.shift:
+            super()._on_mouse_scroll_up(event)
+        elif self.allow_vertical_scroll:
+            self._queue_pointer_scroll(-1)
+            event.stop()
+
+    def find_matching_bracket(
+        self,
+        bracket: str,
+        search_from: tuple[int, int],
+    ) -> Optional[tuple[int, int]]:
+        """Skip bracket scans in low-power mode; otherwise retain Textual behavior."""
+
+        if self.is_mounted and getattr(self.app, "low_power", False):
+            return None
+        return super().find_matching_bracket(bracket, search_from)
 
     def _set_document(self, text: str, language: Optional[str]) -> None:
         """Use Textual's wrapped layout with an O(1) height lookup."""
@@ -940,22 +999,37 @@ class VimTextArea(HalfPageBottomScrollTextArea):
         """Return one source line with persisted annotation ranges styled."""
 
         line = super().get_line(line_index)
-        annotation_style = self.get_component_rich_style("text-area--annotation")
-        for start, end in self._annotation_spans.get(line_index, ()):
-            line.stylize(annotation_style, start, end)
-        active_style = self.get_component_rich_style(
-            "text-area--active-annotation"
-        )
-        for start, end in self._active_annotation_spans.get(line_index, ()):
-            line.stylize(active_style, start, end)
-        rematch_style = self.get_component_rich_style(
-            "text-area--rematch-candidate"
-        )
-        for start, end in self._rematch_candidate_spans.get(line_index, ()):
-            line.stylize(rematch_style, start, end)
-        search_style = self.get_component_rich_style("text-area--search-match")
-        for start, end in self._search_spans.get(line_index, ()):
-            line.stylize(search_style, start, end)
+        annotation_spans = self._annotation_spans.get(line_index, ())
+        if annotation_spans:
+            annotation_style = self.get_component_rich_style(
+                "text-area--annotation"
+            )
+            for start, end in annotation_spans:
+                line.stylize(annotation_style, start, end)
+
+        active_spans = self._active_annotation_spans.get(line_index, ())
+        if active_spans:
+            active_style = self.get_component_rich_style(
+                "text-area--active-annotation"
+            )
+            for start, end in active_spans:
+                line.stylize(active_style, start, end)
+
+        rematch_spans = self._rematch_candidate_spans.get(line_index, ())
+        if rematch_spans:
+            rematch_style = self.get_component_rich_style(
+                "text-area--rematch-candidate"
+            )
+            for start, end in rematch_spans:
+                line.stylize(rematch_style, start, end)
+
+        search_spans = self._search_spans.get(line_index, ())
+        if search_spans:
+            search_style = self.get_component_rich_style(
+                "text-area--search-match"
+            )
+            for start, end in search_spans:
+                line.stylize(search_style, start, end)
         return line
 
     def _should_select(self, force_select: bool = False) -> bool:
@@ -1777,9 +1851,13 @@ class AnnotationTextArea(HalfPageBottomScrollTextArea):
                         "text-area--active-annotation"
                     )
                 )
-        search_style = self.get_component_rich_style("text-area--search-match")
-        for start, end in self._search_spans.get(line_index, ()):
-            line.stylize(search_style, start, end)
+        search_spans = self._search_spans.get(line_index, ())
+        if search_spans:
+            search_style = self.get_component_rich_style(
+                "text-area--search-match"
+            )
+            for start, end in search_spans:
+                line.stylize(search_style, start, end)
         return line
 
     def action_vim_left(self) -> None:
@@ -4755,6 +4833,7 @@ class ViewerApp(App[None]):
         source: LoadedTextFile,
         *,
         soft_wrap: bool = True,
+        low_power: bool = False,
         clipboard_writer: ClipboardWriter = copy_to_system_clipboard,
         source_writer: SourceWriter = save_text_file,
         annotation_store: Optional[AnnotationStore] = None,
@@ -4762,6 +4841,9 @@ class ViewerApp(App[None]):
         embed_on_annotation_save: bool = True,
     ) -> None:
         super().__init__()
+        self.low_power = low_power
+        if low_power:
+            self.animation_level = "none"
         self.source = source
         self._saved_source = source
         self.soft_wrap = soft_wrap
@@ -4899,6 +4981,9 @@ class ViewerApp(App[None]):
                 annotation_ranges=self.annotation_ranges,
                 id="viewer",
             )
+            if self.low_power:
+                viewer.cursor_blink = False
+                viewer.match_cursor_bracket = False
             viewer.border_title = (
                 "Extracted PDF text"
                 if self.source.source_kind == "pdf"
@@ -4910,6 +4995,9 @@ class ViewerApp(App[None]):
                 annotation_links=self.annotation_links,
                 id="annotator",
             )
+            if self.low_power:
+                annotator.cursor_blink = False
+                annotator.match_cursor_bracket = False
             annotator.border_title = "Annotation file"
             yield annotator
         yield Static("", markup=False, id="status")

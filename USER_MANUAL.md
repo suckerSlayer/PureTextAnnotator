@@ -1,7 +1,7 @@
 # Pure Text Annotator 用户操作手册
 
 适用版本：0.11.0
-文档日期：2026-11-14
+文档日期：2026-11-28
 
 ## 1. 软件用途
 
@@ -78,6 +78,22 @@ pta-view --annotations path/to/old.annotations.md path/to/renamed.md
 ```
 
 例如 `chapter.md` 对应 `chapter.md.annotations.md`，`paper.pdf` 对应 `paper.pdf.annotations.md`。
+
+### 3.4 旧设备低功耗模式
+
+在旧款 Mac 或其他性能受限的设备上，可以使用：
+
+```console
+pta-view --low-power path/to/file.md
+```
+
+该模式把终端重绘上限设为 30 FPS，使用常亮光标，关闭括号匹配和非必要动画，并按 30 Hz 合并滚轮或触控板滚动事件。它可以与 `--no-wrap` 同时使用：
+
+```console
+pta-view --low-power --no-wrap path/to/file.md
+```
+
+不指定 `--low-power` 时，默认视觉行为保持不变。
 
 ## 4. 界面与模式
 

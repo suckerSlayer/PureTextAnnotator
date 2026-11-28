@@ -3,15 +3,32 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from . import __version__
 from .annotations import AnnotationStore
-from .app import ViewerApp
 from .files import TextFileError, load_source_file
 from .session_state import load_cursor_position, save_cursor_position
+
+
+# Kept as an injection point for CLI tests; the real app is imported only after
+# low-power runtime settings have been applied.
+ViewerApp: Any = None
+
+
+def _configure_low_power_runtime() -> None:
+    """Cap Textual's redraw rate before Textual itself is imported."""
+
+    configured_fps = os.environ.get("TEXTUAL_FPS")
+    try:
+        fps = int(configured_fps) if configured_fps is not None else None
+    except ValueError:
+        fps = None
+    if fps is None or fps < 1 or fps > 30:
+        os.environ["TEXTUAL_FPS"] = "30"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-wrap",
         action="store_true",
         help="do not wrap long lines",
+    )
+    parser.add_argument(
+        "--low-power",
+        action="store_true",
+        help=(
+            "cap redraws at 30 FPS and disable nonessential visual work"
+        ),
     )
     parser.add_argument(
         "--annotations",
@@ -66,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.low_power:
+        _configure_low_power_runtime()
     try:
         source = load_source_file(
             args.file,
@@ -80,9 +106,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         source.path,
         sidecar_path=args.annotations,
     )
-    app = ViewerApp(
+    viewer_app_class = ViewerApp
+    if viewer_app_class is None:
+        from .app import ViewerApp as viewer_app_class
+
+    app = viewer_app_class(
         source,
         soft_wrap=not args.no_wrap,
+        low_power=args.low_power,
         initial_source_cursor=load_cursor_position(source),
         embed_on_annotation_save=not args.no_embed_on_save,
         annotation_store=annotation_store,
